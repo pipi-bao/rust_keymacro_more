@@ -102,7 +102,7 @@ impl TriggerSource {
     pub fn key_name(&self) -> String {
         match self {
             TriggerSource::Keyboard { key } => key.clone(),
-            TriggerSource::Gamepad { key } => format!("GP:{}", key),
+            TriggerSource::Gamepad { key } => format!("GP:{}", canonicalize_gamepad_key(key)),
         }
     }
 
@@ -457,12 +457,41 @@ impl Config {
 
 }
 
+/// 统一手柄键名，避免 YAML 写 Up 而事件是 DUp 对不上
+pub fn canonicalize_gamepad_key(name: &str) -> String {
+    match name.to_ascii_uppercase().as_str() {
+        "UP" | "DUP" => "DUp".to_string(),
+        "DOWN" | "DDOWN" => "DDown".to_string(),
+        "LEFT" | "DLEFT" => "DLeft".to_string(),
+        "RIGHT" | "DRIGHT" => "DRight".to_string(),
+        "VIEW" | "SELECT" | "BACK" => "Back".to_string(),
+        "MENU" | "START" => "Start".to_string(),
+        "GUIDE" | "XBOX" => "Guide".to_string(),
+        "LT" | "LEFTTRIGGER" => "LT".to_string(),
+        "RT" | "RIGHTTRIGGER" => "RT".to_string(),
+        "LB" | "LEFTSHOULDER" => "LB".to_string(),
+        "RB" | "RIGHTSHOULDER" => "RB".to_string(),
+        "LS" | "LEFTTHUMB" | "L3" => "LS".to_string(),
+        "RS" | "RIGHTTHUMB" | "R3" => "RS".to_string(),
+        other => {
+            // 保留 A/B/X/Y 等常见单字母的常见大小写
+            match other {
+                "A" | "B" | "X" | "Y" => other.to_string(),
+                _ => name.to_string(),
+            }
+        }
+    }
+}
+
 /// 仅手柄存在、键盘没有同名键的按钮
 pub fn is_exclusive_gamepad_button(name: &str) -> bool {
     matches!(
         name.to_ascii_uppercase().as_str(),
         "LB" | "RB" | "LT" | "RT" | "START" | "BACK" | "GUIDE" | "LS" | "RS"
             | "DUP" | "DDOWN" | "DLEFT" | "DRIGHT"
+            | "LEFTTRIGGER" | "RIGHTTRIGGER" | "LEFTSHOULDER" | "RIGHTSHOULDER"
+            | "LEFTTHUMB" | "RIGHTTHUMB" | "L3" | "R3"
+            | "VIEW" | "XBOX"
     )
 }
 
@@ -778,6 +807,25 @@ hotkeys:
 "#;
         let config = Config::from_str(yaml).unwrap();
         assert!(config.needs_virtual_gamepad());
+    }
+
+    #[test]
+    fn test_gamepad_key_aliases_match_events() {
+        let yaml = r#"
+hotkeys:
+  - type: gamepad
+    key: Up
+    action: sequence
+    params:
+      steps: []
+"#;
+        let config = Config::from_str(yaml).unwrap();
+        assert!(config.find_hotkey("GP:DUp").is_some());
+        assert_eq!(config.hotkeys[0].key(), "GP:DUp");
+        assert_eq!(canonicalize_gamepad_key("View"), "Back");
+        assert_eq!(canonicalize_gamepad_key("Xbox"), "Guide");
+        assert_eq!(canonicalize_gamepad_key("L3"), "LS");
+        assert_eq!(canonicalize_gamepad_key("RightTrigger"), "RT");
     }
 
     #[test]

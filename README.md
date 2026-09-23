@@ -218,17 +218,21 @@ hotkeys:
 | `Y` | Y 键（顶部） |
 | `LB` | 左肩键 |
 | `RB` | 右肩键 |
-| `LT` | 左扳机（暂未支持） |
-| `RT` | 右扳机（暂未支持） |
+| `LT` | 左扳机（模拟量过阈值视为按下） |
+| `RT` | 右扳机（模拟量过阈值视为按下） |
 | `Start` | 菜单键 |
 | `Back` | 返回/视图键 |
-| `Guide` | Xbox 按钮 |
+| `Guide` | Xbox 按钮（需 XInputGetStateEx，本程序已自动使用） |
 | `LS` | 左摇杆按下 |
 | `RS` | 右摇杆按下 |
 | `DUp` | 十字键上 |
 | `DDown` | 十字键下 |
 | `DLeft` | 十字键左 |
 | `DRight` | 十字键右 |
+
+**名称别名：** YAML 写 `Up`/`Down`/`Left`/`Right` 视为十字键；`View`/`Select` = `Back`；`Menu` = `Start`；`Xbox` = `Guide`；`L3`/`R3` = 摇杆按下。
+
+**XInput 读不到（不是漏检）：** Xbox Series 的 Share、Elite 拨片、摇杆倾斜方向（只有按下 `LS`/`RS`）。这些没有对应的数字按键位。
 
 **注意：** 支持国产 Xbox 兼容手柄和官方 Xbox 手柄。手柄触发只负责**检测**实体按键；若宏要向游戏**模拟**手柄按键，还需安装 ViGEmBus，见下方「虚拟手柄输出」。
 

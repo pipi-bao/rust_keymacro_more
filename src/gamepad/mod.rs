@@ -5,13 +5,44 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 use vigem_client::{Client, TargetId, XButtons, XGamepad, Xbox360Wired};
+use windows::core::{w, PCSTR};
 use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::Input::XboxController::*;
 
-use crate::config::{Config, TriggerSource};
+/// 标准 XInputGetState 不回报 Xbox 键；ordinal 100 的 GetStateEx 可以
+const XINPUT_GAMEPAD_GUIDE: u16 = 0x0400;
+
+type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
+
+fn xinput_get_state(index: u32, state: &mut XINPUT_STATE) -> u32 {
+    static FN: OnceLock<Option<XInputGetStateFn>> = OnceLock::new();
+    let f = *FN.get_or_init(|| unsafe {
+        for dll in [w!("xinput1_4.dll"), w!("xinput1_3.dll")] {
+            if let Ok(lib) = LoadLibraryW(dll) {
+                // ordinal 100 = XInputGetStateEx，才能读到 Xbox/Guide 键
+                if let Some(p) = GetProcAddress(lib, PCSTR(100usize as *const u8)) {
+                    log::info!("使用 XInputGetStateEx 读取 Xbox/Guide 键");
+                    return Some(std::mem::transmute(p));
+                }
+            }
+        }
+        log::info!("未找到 XInputGetStateEx，Xbox/Guide 键可能无法识别");
+        None
+    });
+    unsafe {
+        match f {
+            Some(ex) => ex(index, state),
+            None => XInputGetState(index, state),
+        }
+    }
+}
+
+use crate::config::{canonicalize_gamepad_key, Config, TriggerSource};
 
 /// 手柄事件类型
 #[derive(Debug, Clone)]
@@ -43,7 +74,7 @@ pub fn apply_output_config(config: &Config) {
         .iter()
         .filter(|h| h.enabled && h.action == "hold_loop")
         .filter_map(|h| match &h.trigger {
-            TriggerSource::Gamepad { key } => match key.to_ascii_uppercase().as_str() {
+            TriggerSource::Gamepad { key } => match canonicalize_gamepad_key(key).as_str() {
                 "LT" => {
                     suppress_lt = true;
                     None
@@ -52,7 +83,7 @@ pub fn apply_output_config(config: &Config) {
                     suppress_rt = true;
                     None
                 }
-                _ => button_name_to_mask(key),
+                canonical => button_name_to_mask(canonical),
             },
             _ => None,
         })
@@ -69,27 +100,28 @@ pub fn button_name_to_mask(name: &str) -> Option<u16> {
         "DDOWN" | "DOWN" => XINPUT_GAMEPAD_DPAD_DOWN.0,
         "DLEFT" | "LEFT" => XINPUT_GAMEPAD_DPAD_LEFT.0,
         "DRIGHT" | "RIGHT" => XINPUT_GAMEPAD_DPAD_RIGHT.0,
-        "START" => XINPUT_GAMEPAD_START.0,
-        "BACK" => XINPUT_GAMEPAD_BACK.0,
-        "LS" => XINPUT_GAMEPAD_LEFT_THUMB.0,
-        "RS" => XINPUT_GAMEPAD_RIGHT_THUMB.0,
-        "LB" => XINPUT_GAMEPAD_LEFT_SHOULDER.0,
-        "RB" => XINPUT_GAMEPAD_RIGHT_SHOULDER.0,
+        "START" | "MENU" => XINPUT_GAMEPAD_START.0,
+        "BACK" | "VIEW" | "SELECT" => XINPUT_GAMEPAD_BACK.0,
+        "LS" | "L3" | "LEFTTHUMB" => XINPUT_GAMEPAD_LEFT_THUMB.0,
+        "RS" | "R3" | "RIGHTTHUMB" => XINPUT_GAMEPAD_RIGHT_THUMB.0,
+        "LB" | "LEFTSHOULDER" => XINPUT_GAMEPAD_LEFT_SHOULDER.0,
+        "RB" | "RIGHTSHOULDER" => XINPUT_GAMEPAD_RIGHT_SHOULDER.0,
         "A" => XINPUT_GAMEPAD_A.0,
         "B" => XINPUT_GAMEPAD_B.0,
         "X" => XINPUT_GAMEPAD_X.0,
         "Y" => XINPUT_GAMEPAD_Y.0,
+        "GUIDE" | "XBOX" => XINPUT_GAMEPAD_GUIDE,
         _ => return None,
     })
 }
 
 /// 按下虚拟手柄按键（叠加到透传状态上）
 pub fn press_gamepad_button(name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    match name.to_ascii_uppercase().as_str() {
+    match canonicalize_gamepad_key(name).as_str() {
         "LT" => EXTRA_LT.store(255, Ordering::Relaxed),
         "RT" => EXTRA_RT.store(255, Ordering::Relaxed),
-        other => {
-            let mask = button_name_to_mask(other)
+        canonical => {
+            let mask = button_name_to_mask(canonical)
                 .ok_or_else(|| format!("未知手柄按键: {}", name))?;
             EXTRA_BUTTONS.fetch_or(mask, Ordering::Relaxed);
         }
@@ -99,11 +131,11 @@ pub fn press_gamepad_button(name: &str) -> Result<(), Box<dyn std::error::Error>
 
 /// 释放虚拟手柄按键
 pub fn release_gamepad_button(name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    match name.to_ascii_uppercase().as_str() {
+    match canonicalize_gamepad_key(name).as_str() {
         "LT" => EXTRA_LT.store(0, Ordering::Relaxed),
         "RT" => EXTRA_RT.store(0, Ordering::Relaxed),
-        other => {
-            let mask = button_name_to_mask(other)
+        canonical => {
+            let mask = button_name_to_mask(canonical)
                 .ok_or_else(|| format!("未知手柄按键: {}", name))?;
             EXTRA_BUTTONS.fetch_and(!mask, Ordering::Relaxed);
         }
@@ -130,7 +162,7 @@ pub fn start_gamepad_thread() -> Receiver<GamepadEvent> {
         let mut found_controller = false;
         for i in 0..4u32 {
             let mut state = XINPUT_STATE::default();
-            let result = unsafe { XInputGetState(i, &mut state) };
+            let result = xinput_get_state(i, &mut state);
             if result == ERROR_SUCCESS.0 {
                 log::info!("检测到手柄 [{}] 已连接", i);
                 found_controller = true;
@@ -183,7 +215,7 @@ pub fn start_gamepad_thread() -> Receiver<GamepadEvent> {
                 }
 
                 let mut state = XINPUT_STATE::default();
-                let result = unsafe { XInputGetState(i as u32, &mut state) };
+                let result = xinput_get_state(i as u32, &mut state);
 
                 if result == ERROR_SUCCESS.0 {
                     if !controller_connected[i] {
@@ -309,7 +341,7 @@ fn check_button_changes(
     changed: u16,
     sender: &mpsc::Sender<GamepadEvent>,
 ) {
-    let buttons: [(u16, &str); 14] = [
+    let buttons: [(u16, &str); 15] = [
         (XINPUT_GAMEPAD_DPAD_UP.0, "DUp"),
         (XINPUT_GAMEPAD_DPAD_DOWN.0, "DDown"),
         (XINPUT_GAMEPAD_DPAD_LEFT.0, "DLeft"),
@@ -324,6 +356,7 @@ fn check_button_changes(
         (XINPUT_GAMEPAD_B.0, "B"),
         (XINPUT_GAMEPAD_X.0, "X"),
         (XINPUT_GAMEPAD_Y.0, "Y"),
+        (XINPUT_GAMEPAD_GUIDE, "Guide"),
     ];
 
     for (mask, name) in &buttons {
