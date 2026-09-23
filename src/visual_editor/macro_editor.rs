@@ -158,10 +158,25 @@ fn edit_auto_repeat_action(
 
         // 目标按键
         ui.label("连发目标按键:");
+        ui.horizontal(|ui| {
+            let mut is_gamepad = params.device.as_deref() == Some("gamepad")
+                || crate::config::uses_gamepad_device(params.device.as_deref(), &params.key);
+            let old = is_gamepad;
+            ui.checkbox(&mut is_gamepad, "🎮 手柄");
+            if is_gamepad != old {
+                params.device = if is_gamepad { Some("gamepad".to_string()) } else { None };
+                if is_gamepad && !crate::config::is_exclusive_gamepad_button(&params.key) {
+                    params.key = "LB".to_string();
+                }
+                editor.config_changed = true;
+            }
+        });
         let btn_text = format!("🔑 {}", if params.key.is_empty() { "点击选择...".to_string() } else { params.key.clone() });
         if ui.button(btn_text).clicked() {
             editor.step_editing_key = params.key.clone();
             editor.key_selector_for_step = true;
+            editor.key_selector_for_gamepad = params.device.as_deref() == Some("gamepad")
+                || crate::config::uses_gamepad_device(params.device.as_deref(), &params.key);
             editor.key_selector_macro_idx = idx;
             editor.key_selector_step_idx = usize::MAX; // 标记为连发目标键，非步骤
             editor.show_key_selector_window = true;

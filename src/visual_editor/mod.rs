@@ -145,6 +145,11 @@ impl VisualEditor {
                             if let Some(hotkey) = self.config.hotkeys.get_mut(self.key_selector_macro_idx) {
                                 if let ActionParams::AutoRepeat(params) = &mut hotkey.params {
                                     params.key = self.step_editing_key.clone();
+                                    params.device = if self.key_selector_for_gamepad {
+                                        Some("gamepad".to_string())
+                                    } else {
+                                        None
+                                    };
                                     self.config_changed = true;
                                 }
                             }

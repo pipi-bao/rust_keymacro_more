@@ -216,6 +216,9 @@ pub struct AutoRepeatParams {
     /// 释放后到下一次按下的间隔（毫秒）
     #[serde(default = "default_release_ms")]
     pub release_ms: u64,
+    /// "keyboard" 或 "gamepad"；缺省时按键名判断
+    #[serde(default)]
+    pub device: Option<String>,
 }
 
 impl Default for AutoRepeatParams {
@@ -224,6 +227,7 @@ impl Default for AutoRepeatParams {
             key: "A".to_string(),
             press_ms: default_press_ms(),
             release_ms: default_release_ms(),
+            device: None,
         }
     }
 }
@@ -446,15 +450,9 @@ impl Config {
         self.hotkeys.iter().find(|h| h.trigger.matches(key))
     }
 
-    /// 是否需要虚拟手柄输出（已启用的 hold_loop 中含手柄按键）
+    /// 是否需要虚拟手柄输出（任一已启用宏的输出含手柄按键）
     pub fn needs_virtual_gamepad(&self) -> bool {
-        self.hotkeys.iter().filter(|h| h.enabled).any(|h| match &h.params {
-            ActionParams::HoldLoop(p) => {
-                p.steps.iter().any(step_uses_gamepad)
-                    || p.every.iter().any(|a| uses_gamepad_device(a.device.as_deref(), &a.key))
-            }
-            _ => false,
-        })
+        self.hotkeys.iter().filter(|h| h.enabled).any(hotkey_outputs_gamepad)
     }
 
 }
@@ -481,6 +479,19 @@ fn step_uses_gamepad(step: &Step) -> bool {
     match step {
         Step::Key { value, device, .. } => uses_gamepad_device(device.as_deref(), value),
         _ => false,
+    }
+}
+
+/// 该宏执行时是否会向虚拟手柄输出按键
+fn hotkey_outputs_gamepad(hotkey: &HotkeyConfig) -> bool {
+    match &hotkey.params {
+        ActionParams::HoldLoop(p) => {
+            p.steps.iter().any(step_uses_gamepad)
+                || p.every.iter().any(|a| uses_gamepad_device(a.device.as_deref(), &a.key))
+        }
+        ActionParams::Sequence(p) => p.steps.iter().any(step_uses_gamepad),
+        ActionParams::AutoRepeat(p) => uses_gamepad_device(p.device.as_deref(), &p.key),
+        ActionParams::TypeText(_) => false,
     }
 }
 
@@ -732,6 +743,41 @@ hotkeys:
         assert!(config.hotkeys[0].enabled);
         assert!(!config.hotkeys[1].enabled);
         assert!(!config.needs_virtual_gamepad());
+    }
+
+    #[test]
+    fn test_sequence_gamepad_needs_virtual_pad() {
+        let yaml = r#"
+hotkeys:
+  - type: gamepad
+    key: RT
+    enabled: true
+    action: sequence
+    params:
+      steps:
+        - { type: key, value: RT, device: gamepad, delay: 50 }
+        - { type: key, value: RB, device: gamepad, delay: 50 }
+"#;
+        let config = Config::from_str(yaml).unwrap();
+        assert!(config.needs_virtual_gamepad());
+    }
+
+    #[test]
+    fn test_auto_repeat_gamepad_needs_virtual_pad() {
+        let yaml = r#"
+hotkeys:
+  - type: gamepad
+    key: LT
+    enabled: true
+    action: auto_repeat
+    params:
+      key: RB
+      device: gamepad
+      press_ms: 20
+      release_ms: 30
+"#;
+        let config = Config::from_str(yaml).unwrap();
+        assert!(config.needs_virtual_gamepad());
     }
 
     #[test]

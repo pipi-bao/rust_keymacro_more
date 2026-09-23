@@ -18,14 +18,14 @@ use crate::winapi::mouse;
 ///
 /// 供连发线程循环调用。每次执行一轮完整的按下/释放。
 pub fn execute_auto_repeat_once(params: &AutoRepeatParams) -> Result<(), Box<dyn std::error::Error>> {
-    let vk = parse_key_string(&params.key)
-        .ok_or_else(|| format!("无法解析连发按键: {}", params.key))?;
-
-    keyboard::simulate_key_press(vk)?;
-    thread::sleep(Duration::from_millis(params.press_ms));
-    keyboard::simulate_key_release(vk)?;
+    execute_output_key(
+        &params.key,
+        params.device.as_deref(),
+        &KeyAction::Complete,
+        params.press_ms,
+        None,
+    )?;
     thread::sleep(Duration::from_millis(params.release_ms));
-
     Ok(())
 }
 

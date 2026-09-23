@@ -24,6 +24,11 @@ static EXTRA_BUTTONS: AtomicU16 = AtomicU16::new(0);
 static EXTRA_LT: AtomicU8 = AtomicU8::new(0);
 static EXTRA_RT: AtomicU8 = AtomicU8::new(0);
 static SUPPRESS_BUTTONS: AtomicU16 = AtomicU16::new(0);
+static SUPPRESS_LT: AtomicBool = AtomicBool::new(false);
+static SUPPRESS_RT: AtomicBool = AtomicBool::new(false);
+
+/// 扳机按下判定阈值（0–255）
+const TRIGGER_THRESHOLD: u8 = 30;
 static VIGEM_WANTED: AtomicBool = AtomicBool::new(false);
 static VIGEM_WARNED: AtomicBool = AtomicBool::new(false);
 static VIGEM_OWNER: AtomicBool = AtomicBool::new(false);
@@ -31,16 +36,30 @@ static VIGEM_OWNER: AtomicBool = AtomicBool::new(false);
 /// 根据配置决定是否启用虚拟手柄，并屏蔽 hold_loop 的物理触发键
 pub fn apply_output_config(config: &Config) {
     VIGEM_WANTED.store(config.needs_virtual_gamepad(), Ordering::Relaxed);
+    let mut suppress_lt = false;
+    let mut suppress_rt = false;
     let suppress = config
         .hotkeys
         .iter()
         .filter(|h| h.enabled && h.action == "hold_loop")
         .filter_map(|h| match &h.trigger {
-            TriggerSource::Gamepad { key } => button_name_to_mask(key),
+            TriggerSource::Gamepad { key } => match key.to_ascii_uppercase().as_str() {
+                "LT" => {
+                    suppress_lt = true;
+                    None
+                }
+                "RT" => {
+                    suppress_rt = true;
+                    None
+                }
+                _ => button_name_to_mask(key),
+            },
             _ => None,
         })
         .fold(0u16, |acc, mask| acc | mask);
     SUPPRESS_BUTTONS.store(suppress, Ordering::Relaxed);
+    SUPPRESS_LT.store(suppress_lt, Ordering::Relaxed);
+    SUPPRESS_RT.store(suppress_rt, Ordering::Relaxed);
 }
 
 /// 手柄按键名 → XInput 按钮掩码（扳机 LT/RT 除外）
@@ -123,6 +142,8 @@ pub fn start_gamepad_thread() -> Receiver<GamepadEvent> {
         }
 
         let mut prev_states: [u16; 4] = [0; 4];
+        let mut prev_lt: [u8; 4] = [0; 4];
+        let mut prev_rt: [u8; 4] = [0; 4];
         let mut controller_connected: [bool; 4] = [false; 4];
         let mut virtual_pad: Option<Xbox360Wired<Client>> = None;
 
@@ -184,6 +205,13 @@ pub fn start_gamepad_thread() -> Receiver<GamepadEvent> {
                         prev_states[i] = current_buttons;
                     }
 
+                    let lt = state.Gamepad.bLeftTrigger;
+                    let rt = state.Gamepad.bRightTrigger;
+                    check_trigger_edge(i as u32, "LT", prev_lt[i], lt, &sender);
+                    check_trigger_edge(i as u32, "RT", prev_rt[i], rt, &sender);
+                    prev_lt[i] = lt;
+                    prev_rt[i] = rt;
+
                     if passthrough.is_none() {
                         passthrough = Some(state.Gamepad);
                     }
@@ -191,6 +219,8 @@ pub fn start_gamepad_thread() -> Receiver<GamepadEvent> {
                     log::info!("手柄 [{}] 已断开", i);
                     controller_connected[i] = false;
                     prev_states[i] = 0;
+                    prev_lt[i] = 0;
+                    prev_rt[i] = 0;
                 }
             }
 
@@ -199,12 +229,14 @@ pub fn start_gamepad_thread() -> Receiver<GamepadEvent> {
                 let suppress = SUPPRESS_BUTTONS.load(Ordering::Relaxed);
                 let extra_lt = EXTRA_LT.load(Ordering::Relaxed);
                 let extra_rt = EXTRA_RT.load(Ordering::Relaxed);
+                let suppress_lt = SUPPRESS_LT.load(Ordering::Relaxed);
+                let suppress_rt = SUPPRESS_RT.load(Ordering::Relaxed);
 
                 let report = if let Some(gp) = passthrough {
                     XGamepad {
                         buttons: XButtons::from((gp.wButtons.0 & !suppress) | extra),
-                        left_trigger: gp.bLeftTrigger.max(extra_lt),
-                        right_trigger: gp.bRightTrigger.max(extra_rt),
+                        left_trigger: if suppress_lt { extra_lt } else { gp.bLeftTrigger.max(extra_lt) },
+                        right_trigger: if suppress_rt { extra_rt } else { gp.bRightTrigger.max(extra_rt) },
                         thumb_lx: gp.sThumbLX,
                         thumb_ly: gp.sThumbLY,
                         thumb_rx: gp.sThumbRX,
@@ -237,6 +269,36 @@ fn connect_virtual_pad() -> Result<Xbox360Wired<Client>, String> {
     target.plugin().map_err(|e| format!("{:?}", e))?;
     target.wait_ready().map_err(|e| format!("{:?}", e))?;
     Ok(target)
+}
+
+/// 扳机模拟量过阈值时视为按下/松开
+fn check_trigger_edge(
+    controller_id: u32,
+    name: &str,
+    prev: u8,
+    current: u8,
+    sender: &mpsc::Sender<GamepadEvent>,
+) {
+    let was_down = prev >= TRIGGER_THRESHOLD;
+    let is_down = current >= TRIGGER_THRESHOLD;
+    if was_down == is_down {
+        return;
+    }
+    if is_down {
+        log::info!("手柄 [{}] 扳机按下: {} ({})", controller_id, name, current);
+        if let Err(e) = sender.send(GamepadEvent::ButtonPressed {
+            button: name.to_string(),
+        }) {
+            log::error!("发送扳机按下事件失败: {}", e);
+        }
+    } else {
+        log::info!("手柄 [{}] 扳机释放: {} ({})", controller_id, name, current);
+        if let Err(e) = sender.send(GamepadEvent::ButtonReleased {
+            button: name.to_string(),
+        }) {
+            log::error!("发送扳机释放事件失败: {}", e);
+        }
+    }
 }
 
 /// 检查按钮变化并发送事件
