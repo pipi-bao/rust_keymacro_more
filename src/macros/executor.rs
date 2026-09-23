@@ -3,9 +3,14 @@
 //! 负责执行各种宏操作，包括输入文本、按键序列和鼠标操作
 
 use rand::Rng;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
-use crate::config::{TypeTextParams, SequenceParams, Step, KeyAction, MouseAction as ConfigMouseAction, MouseButtonType, AutoRepeatParams};
+use std::time::{Duration, Instant};
+use crate::config::{
+    uses_gamepad_device, TypeTextParams, SequenceParams, Step, KeyAction,
+    MouseAction as ConfigMouseAction, MouseButtonType, AutoRepeatParams, IntervalAction,
+};
+use crate::gamepad;
 use crate::winapi::keyboard;
 use crate::winapi::mouse;
 
@@ -47,52 +52,118 @@ pub fn execute_type_text(params: &TypeTextParams) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+/// 可中断等待，松开触发键时尽快结束当前步骤
+fn sleep_interruptible(ms: u64, stop: Option<&AtomicBool>) {
+    if ms == 0 {
+        return;
+    }
+    let Some(flag) = stop else {
+        thread::sleep(Duration::from_millis(ms));
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_millis(ms);
+    while Instant::now() < deadline {
+        if flag.load(Ordering::Relaxed) {
+            return;
+        }
+        let remain = deadline.saturating_duration_since(Instant::now());
+        thread::sleep(remain.min(Duration::from_millis(10)));
+    }
+}
+
+fn should_stop(stop: Option<&AtomicBool>) -> bool {
+    stop.map(|f| f.load(Ordering::Relaxed)).unwrap_or(false)
+}
+
+/// 执行一次按键（键盘或手柄）
+pub fn execute_output_key(
+    value: &str,
+    device: Option<&str>,
+    action: &KeyAction,
+    delay_ms: u64,
+    stop: Option<&AtomicBool>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if uses_gamepad_device(device, value) {
+        match action {
+            KeyAction::Press => {
+                gamepad::press_gamepad_button(value)?;
+                sleep_interruptible(delay_ms, stop);
+            }
+            KeyAction::Release => {
+                gamepad::release_gamepad_button(value)?;
+                sleep_interruptible(delay_ms, stop);
+            }
+            KeyAction::Complete => {
+                gamepad::press_gamepad_button(value)?;
+                sleep_interruptible(delay_ms.max(1), stop);
+                gamepad::release_gamepad_button(value)?;
+            }
+        }
+        return Ok(());
+    }
+
+    let vk = parse_key_string(value).ok_or_else(|| format!("无法解析按键: {}", value))?;
+    match action {
+        KeyAction::Press => {
+            keyboard::simulate_key_press(vk)?;
+            sleep_interruptible(delay_ms, stop);
+        }
+        KeyAction::Release => {
+            keyboard::simulate_key_release(vk)?;
+            sleep_interruptible(delay_ms, stop);
+        }
+        KeyAction::Complete => {
+            keyboard::simulate_key_press(vk)?;
+            sleep_interruptible(delay_ms.max(1), stop);
+            keyboard::simulate_key_release(vk)?;
+        }
+    }
+    Ok(())
+}
+
+/// 执行定时附加按键（按下 + 释放）
+pub fn execute_interval_action(
+    action: &IntervalAction,
+    stop: Option<&AtomicBool>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    execute_output_key(
+        &action.key,
+        action.device.as_deref(),
+        &KeyAction::Complete,
+        action.press_ms,
+        stop,
+    )
+}
+
 /// 执行序列操作
 pub fn execute_sequence(params: &SequenceParams) -> Result<(), Box<dyn std::error::Error>> {
-    log::info!("开始执行序列，共 {} 个步骤", params.steps.len());
-    for (idx, step) in params.steps.iter().enumerate() {
+    execute_steps(&params.steps, None)
+}
+
+/// 执行步骤列表，可选在停止标志置位时提前结束
+pub fn execute_steps(steps: &[Step], stop: Option<&AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
+    log::debug!("开始执行序列，共 {} 个步骤", steps.len());
+    for (idx, step) in steps.iter().enumerate() {
+        if should_stop(stop) {
+            log::debug!("序列被中断");
+            return Ok(());
+        }
         log::debug!("执行步骤 {}: {:?}", idx + 1, step);
         match step {
-            Step::Key { value, delay, action } => {
-                if let Some(vk) = parse_key_string(value) {
-                    let key_action = action.as_ref().unwrap_or(&KeyAction::Complete);
-                    log::debug!("按键: {}, 动作: {:?}", value, key_action);
-
-                    match key_action {
-                        KeyAction::Press => {
-                            keyboard::simulate_key_press(vk)?;
-                            log::debug!("按下按键: {}", value);
-                            if let Some(d) = delay {
-                                thread::sleep(Duration::from_millis(d.get_delay()));
-                            }
-                        }
-                        KeyAction::Release => {
-                            keyboard::simulate_key_release(vk)?;
-                            log::debug!("释放按键: {}", value);
-                            if let Some(d) = delay {
-                                thread::sleep(Duration::from_millis(d.get_delay()));
-                            }
-                        }
-                        KeyAction::Complete => {
-                            keyboard::simulate_key_press(vk)?;
-                            log::debug!("按下按键: {}", value);
-                            if let Some(d) = delay {
-                                thread::sleep(Duration::from_millis(d.get_delay()));
-                            }
-                            keyboard::simulate_key_release(vk)?;
-                            log::debug!("释放按键: {}", value);
-                        }
-                    }
-                } else {
-                    log::warn!("无法解析按键: {}", value);
+            Step::Key { value, delay, action, device } => {
+                let key_action = action.as_ref().unwrap_or(&KeyAction::Complete);
+                let delay_ms = delay.as_ref().map(|d| d.get_delay()).unwrap_or(0);
+                log::debug!("按键: {}, 动作: {:?}, device: {:?}", value, key_action, device);
+                if let Err(e) = execute_output_key(value, device.as_deref(), key_action, delay_ms, stop) {
+                    log::warn!("按键执行失败 ({}): {}", value, e);
                 }
             }
             Step::Wait { value } => {
-                thread::sleep(Duration::from_millis(*value));
+                sleep_interruptible(*value, stop);
             }
             Step::WaitRandom { min, max } => {
                 let actual_delay = rand::thread_rng().gen_range(*min..=*max);
-                thread::sleep(Duration::from_millis(actual_delay));
+                sleep_interruptible(actual_delay, stop);
             }
             Step::Text { value, delay } => {
                 for ch in value.chars() {
@@ -165,7 +236,7 @@ pub fn execute_sequence(params: &SequenceParams) -> Result<(), Box<dyn std::erro
         }
     }
 
-    log::info!("序列执行完成");
+    log::debug!("序列执行完成");
     Ok(())
 }
 

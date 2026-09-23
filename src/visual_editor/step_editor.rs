@@ -18,8 +18,8 @@ pub fn edit_sequence_action(
     ui.separator();
     
     // 显示步骤数量
-    if let ActionParams::Sequence(params) = &editor.config.hotkeys[idx].params {
-        ui.label(format!("📊 步骤数量: {}", params.steps.len()));
+    if let Some(steps) = editor.config.hotkeys[idx].params.steps() {
+        ui.label(format!("📊 步骤数量: {}", steps.len()));
     }
     
     // 步骤列表
@@ -101,11 +101,7 @@ pub fn edit_sequence_action(
         ui.label("✏ 编辑步骤详情:");
 
         // 获取总步骤数，用于启用/禁用按钮和键盘
-        let total_steps = if let ActionParams::Sequence(params) = &editor.config.hotkeys[idx].params {
-            params.steps.len()
-        } else {
-            0
-        };
+        let total_steps = editor.config.hotkeys[idx].params.steps().map(|s| s.len()).unwrap_or(0);
 
         // 上移/下移按钮
         let mut new_selected: Option<usize> = None;
@@ -134,8 +130,8 @@ pub fn edit_sequence_action(
 
         // 执行移动操作
         if let Some(new_idx) = new_selected {
-            if let ActionParams::Sequence(params) = &mut editor.config.hotkeys[idx].params {
-                params.steps.swap(step_idx, new_idx);
+            if let Some(steps) = editor.config.hotkeys[idx].params.steps_mut() {
+                steps.swap(step_idx, new_idx);
                 editor.config_changed = true;
                 ui.data_mut(|data| {
                     data.insert_temp(Id::new("selected_step"), new_idx);
@@ -165,8 +161,8 @@ fn show_step_list(
         .min_scrolled_height(100.0)
         .max_height(ui.available_height() - 150.0)
         .show(ui, |ui| {
-            if let ActionParams::Sequence(params) = &mut editor.config.hotkeys[idx].params {
-                for (i, step) in params.steps.iter_mut().enumerate() {
+            if let Some(steps) = editor.config.hotkeys[idx].params.steps_mut() {
+                for (i, step) in steps.iter_mut().enumerate() {
                     let is_selected = ui.data(|data| data.get_temp::<usize>(Id::new("selected_step")) == Some(i));
 
                     let frame = egui::Frame::none()
@@ -185,8 +181,9 @@ fn show_step_list(
 
                         ui.horizontal(|ui| {
                             match step {
-                                Step::Key { value, .. } => {
-                                    let label = ui.add(egui::Label::new("⌨ 按键:").sense(egui::Sense::click()));
+                                Step::Key { value, device, .. } => {
+                                    let icon = if device.as_deref() == Some("gamepad") { "🎮 按键:" } else { "⌨ 按键:" };
+                                    let label = ui.add(egui::Label::new(icon).sense(egui::Sense::click()));
                                     if label.clicked() {
                                         ui.data_mut(|data| {
                                             if is_selected {
@@ -327,12 +324,16 @@ fn show_step_list(
     // 处理按键选择面板的打开请求（在循环外，避免借用冲突）
     if let Some(step_idx) = pending_key_selector {
         // 获取当前键值
-        if let ActionParams::Sequence(params) = &editor.config.hotkeys[idx].params {
-            if let Some(Step::Key { value, .. }) = params.steps.get(step_idx) {
+        let mut for_gamepad = false;
+        if let Some(steps) = editor.config.hotkeys[idx].params.steps() {
+            if let Some(Step::Key { value, device, .. }) = steps.get(step_idx) {
                 editor.step_editing_key = value.clone();
+                for_gamepad = device.as_deref() == Some("gamepad")
+                    || crate::config::is_exclusive_gamepad_button(value);
             }
         }
         editor.key_selector_for_step = true;
+        editor.key_selector_for_gamepad = for_gamepad;
         editor.key_selector_macro_idx = idx;
         editor.key_selector_step_idx = step_idx;
         editor.show_key_selector_window = true;
@@ -346,14 +347,22 @@ fn add_key_step(
     status_message: &mut String,
     log_messages: &mut Vec<String>,
 ) -> Option<usize> {
+    let device = editor.config.hotkeys.get(idx).and_then(|hk| {
+        if hk.action == "hold_loop" && matches!(hk.trigger, TriggerSource::Gamepad { .. }) {
+            Some("gamepad".to_string())
+        } else {
+            None
+        }
+    });
     if let Some(hotkey) = editor.config.hotkeys.get_mut(idx) {
-        if let ActionParams::Sequence(params) = &mut hotkey.params {
-            params.steps.push(Step::Key {
-                value: "A".to_string(),
+        if let Some(steps) = hotkey.params.steps_mut() {
+            steps.push(Step::Key {
+                value: if device.is_some() { "LB".to_string() } else { "A".to_string() },
                 delay: Some(DelayConfig::Fixed(50)),
                 action: Some(KeyAction::Complete),
+                device,
             });
-            let new_idx = params.steps.len() - 1;
+            let new_idx = steps.len() - 1;
             *status_message = "已添加按键步骤".to_string();
             log_messages.push("[INFO] 添加按键步骤".to_string());
             return Some(new_idx);
@@ -371,11 +380,11 @@ fn add_wait_step_with_value(
     log_messages: &mut Vec<String>,
 ) -> Option<usize> {
     if let Some(hotkey) = editor.config.hotkeys.get_mut(idx) {
-        if let ActionParams::Sequence(params) = &mut hotkey.params {
-            params.steps.push(Step::Wait {
+        if let Some(steps) = hotkey.params.steps_mut() {
+            steps.push(Step::Wait {
                 value: wait_ms,
             });
-            let new_idx = params.steps.len() - 1;
+            let new_idx = steps.len() - 1;
             *status_message = format!("已添加等待步骤 ({}ms)", wait_ms);
             log_messages.push(format!("[INFO] 添加等待步骤 ({}ms)", wait_ms));
             return Some(new_idx);
@@ -394,12 +403,12 @@ fn add_wait_random_step(
     log_messages: &mut Vec<String>,
 ) -> Option<usize> {
     if let Some(hotkey) = editor.config.hotkeys.get_mut(idx) {
-        if let ActionParams::Sequence(params) = &mut hotkey.params {
-            params.steps.push(Step::WaitRandom {
+        if let Some(steps) = hotkey.params.steps_mut() {
+            steps.push(Step::WaitRandom {
                 min: min_ms,
                 max: max_ms,
             });
-            let new_idx = params.steps.len() - 1;
+            let new_idx = steps.len() - 1;
             *status_message = format!("已添加随机延迟步骤 ({}~{}ms)", min_ms, max_ms);
             log_messages.push(format!("[INFO] 添加随机延迟步骤 ({}~{}ms)", min_ms, max_ms));
             return Some(new_idx);
@@ -416,12 +425,12 @@ fn add_text_step(
     log_messages: &mut Vec<String>,
 ) -> Option<usize> {
     if let Some(hotkey) = editor.config.hotkeys.get_mut(idx) {
-        if let ActionParams::Sequence(params) = &mut hotkey.params {
-            params.steps.push(Step::Text {
+        if let Some(steps) = hotkey.params.steps_mut() {
+            steps.push(Step::Text {
                 value: "hello".to_string(),
                 delay: Some(DelayConfig::Fixed(10)),
             });
-            let new_idx = params.steps.len() - 1;
+            let new_idx = steps.len() - 1;
             *status_message = "已添加文本步骤".to_string();
             log_messages.push("[INFO] 添加文本步骤".to_string());
             return Some(new_idx);
@@ -439,17 +448,17 @@ fn add_mouse_click_step(
     log_messages: &mut Vec<String>,
 ) -> Option<usize> {
     if let Some(hotkey) = editor.config.hotkeys.get_mut(idx) {
-        if let ActionParams::Sequence(params) = &mut hotkey.params {
+        if let Some(steps) = hotkey.params.steps_mut() {
             let btn_label = match button {
                 MouseButtonType::Left => "左键",
                 MouseButtonType::Right => "右键",
                 MouseButtonType::Middle => "中键",
             };
-            params.steps.push(Step::MouseClick {
+            steps.push(Step::MouseClick {
                 button,
                 delay: Some(DelayConfig::Fixed(50)),
             });
-            let new_idx = params.steps.len() - 1;
+            let new_idx = steps.len() - 1;
             *status_message = format!("已添加鼠标{}点击步骤", btn_label);
             log_messages.push(format!("[INFO] 添加鼠标{}点击步骤", btn_label));
             return Some(new_idx);
@@ -467,9 +476,9 @@ fn remove_step(
     log_messages: &mut Vec<String>,
 ) {
     if let Some(hotkey) = editor.config.hotkeys.get_mut(macro_idx) {
-        if let ActionParams::Sequence(params) = &mut hotkey.params {
-            if step_idx < params.steps.len() {
-                params.steps.remove(step_idx);
+        if let Some(steps) = hotkey.params.steps_mut() {
+            if step_idx < steps.len() {
+                steps.remove(step_idx);
                 *status_message = "已删除步骤".to_string();
                 log_messages.push("[INFO] 删除步骤".to_string());
             }
@@ -487,9 +496,9 @@ fn edit_step_detail(
     log_messages: &mut Vec<String>,
 ) {
     // 使用索引访问而不是直接借用 step，避免借用冲突
-    let step_type = if let ActionParams::Sequence(params) = &editor.config.hotkeys[macro_idx].params {
-        if step_idx < params.steps.len() {
-            match &params.steps[step_idx] {
+    let step_type = if let Some(params) = editor.config.hotkeys[macro_idx].params.steps() {
+        if step_idx < params.len() {
+            match &params[step_idx] {
                 Step::Key { .. } => 0,
                 Step::Wait { .. } => 1,
                 Step::Text { .. } => 2,
@@ -528,11 +537,21 @@ fn edit_key_step(
     status_message: &mut String,
     log_messages: &mut Vec<String>,
 ) {
-    if let ActionParams::Sequence(params) = &mut editor.config.hotkeys[macro_idx].params {
-        if let Step::Key { delay, action, .. } = &mut params.steps[step_idx] {
-            ui.label("⌨ 按键配置:");
-            
-            // 按键已在内联列表中直接可改，详情只显示动作和延迟
+    if let Some(params) = editor.config.hotkeys[macro_idx].params.steps_mut() {
+        if let Step::Key { delay, action, device, .. } = &mut params[step_idx] {
+            ui.label("按键配置:");
+
+            ui.horizontal(|ui| {
+                ui.label("输出:");
+                let mut is_gamepad = device.as_deref() == Some("gamepad");
+                let old = is_gamepad;
+                ui.radio_value(&mut is_gamepad, false, "⌨ 键盘");
+                ui.radio_value(&mut is_gamepad, true, "🎮 手柄");
+                if is_gamepad != old {
+                    *device = if is_gamepad { Some("gamepad".to_string()) } else { None };
+                    editor.config_changed = true;
+                }
+            });
             
             let mut action_str = match action {
                 Some(KeyAction::Press) => "press".to_string(),
@@ -592,8 +611,8 @@ fn edit_wait_step(
     status_message: &mut String,
     log_messages: &mut Vec<String>,
 ) {
-    if let ActionParams::Sequence(params) = &mut editor.config.hotkeys[macro_idx].params {
-        if let Step::Wait { value } = &mut params.steps[step_idx] {
+    if let Some(params) = editor.config.hotkeys[macro_idx].params.steps_mut() {
+        if let Step::Wait { value } = &mut params[step_idx] {
             ui.label("⏱ 等待配置:");
             ui.horizontal(|ui| {
                 ui.label("等待时间:");
@@ -621,8 +640,8 @@ fn edit_wait_random_step(
     status_message: &mut String,
     log_messages: &mut Vec<String>,
 ) {
-    if let ActionParams::Sequence(params) = &mut editor.config.hotkeys[macro_idx].params {
-        if let Step::WaitRandom { min, max } = &mut params.steps[step_idx] {
+    if let Some(params) = editor.config.hotkeys[macro_idx].params.steps_mut() {
+        if let Step::WaitRandom { min, max } = &mut params[step_idx] {
             ui.label("🎲 随机延迟配置:");
             ui.horizontal(|ui| {
                 ui.label("最小:");
@@ -658,8 +677,8 @@ fn edit_text_step(
     status_message: &mut String,
     log_messages: &mut Vec<String>,
 ) {
-    if let ActionParams::Sequence(params) = &mut editor.config.hotkeys[macro_idx].params {
-        if let Step::Text { value, delay: _ } = &mut params.steps[step_idx] {
+    if let Some(params) = editor.config.hotkeys[macro_idx].params.steps_mut() {
+        if let Step::Text { value, delay: _ } = &mut params[step_idx] {
             ui.label("✍ 文本配置:");
             
             ui.label("输入文本:");
@@ -685,8 +704,8 @@ fn edit_mouse_click_step(
     status_message: &mut String,
     log_messages: &mut Vec<String>,
 ) {
-    if let ActionParams::Sequence(params) = &mut editor.config.hotkeys[macro_idx].params {
-        if let Step::MouseClick { button, delay } = &mut params.steps[step_idx] {
+    if let Some(params) = editor.config.hotkeys[macro_idx].params.steps_mut() {
+        if let Step::MouseClick { button, delay } = &mut params[step_idx] {
             ui.label("🖱 鼠标点击配置:");
             
             ui.label("按钮:");
@@ -730,8 +749,8 @@ fn edit_mouse_action_step(
     status_message: &mut String,
     log_messages: &mut Vec<String>,
 ) {
-    if let ActionParams::Sequence(params) = &mut editor.config.hotkeys[macro_idx].params {
-        if let Step::MouseAction { button, action, delay } = &mut params.steps[step_idx] {
+    if let Some(params) = editor.config.hotkeys[macro_idx].params.steps_mut() {
+        if let Step::MouseAction { button, action, delay } = &mut params[step_idx] {
             ui.label("🖱 鼠标动作配置:");
             
             ui.label("按钮:");
@@ -795,8 +814,8 @@ fn edit_mouse_move_step(
     status_message: &mut String,
     log_messages: &mut Vec<String>,
 ) {
-    if let ActionParams::Sequence(params) = &mut editor.config.hotkeys[macro_idx].params {
-        if let Step::MouseMove { x, y, relative, delay } = &mut params.steps[step_idx] {
+    if let Some(params) = editor.config.hotkeys[macro_idx].params.steps_mut() {
+        if let Step::MouseMove { x, y, relative, delay } = &mut params[step_idx] {
             ui.label("🖱 鼠标移动配置:");
             
             ui.label("移动类型:");
@@ -842,8 +861,8 @@ fn edit_mouse_wheel_step(
     status_message: &mut String,
     log_messages: &mut Vec<String>,
 ) {
-    if let ActionParams::Sequence(params) = &mut editor.config.hotkeys[macro_idx].params {
-        if let Step::MouseWheel { delta, delay } = &mut params.steps[step_idx] {
+    if let Some(params) = editor.config.hotkeys[macro_idx].params.steps_mut() {
+        if let Step::MouseWheel { delta, delay } = &mut params[step_idx] {
             ui.label("🖱 鼠标滚轮配置:");
             
             ui.label("滚轮:");

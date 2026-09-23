@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use crate::config::{ActionParams, AutoRepeatParams};
+use crate::config::{ActionParams, AutoRepeatParams, HoldLoopParams};
 use crate::gamepad::GamepadEvent;
 use crate::macros::{get_config, get_event_sender, get_macro_phase, get_toggle_state, set_macro_phase};
 
@@ -79,6 +79,108 @@ fn start_auto_repeat(key_name: &str, params: AutoRepeatParams) {
             }
         }
         log::debug!("连发线程结束: {}", key_name_owned);
+    });
+}
+
+/// 活跃按住循环线程的停止标志
+static HOLD_LOOP_STOPS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+
+fn hold_loop_stops() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    HOLD_LOOP_STOPS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn stop_hold_loop(key_name: &str) {
+    if let Ok(mut stops) = hold_loop_stops().lock() {
+        if let Some(flag) = stops.remove(key_name) {
+            flag.store(true, Ordering::Relaxed);
+            crate::gamepad::clear_extra_buttons();
+            log::debug!("停止按住循环: {}", key_name);
+        }
+    }
+}
+
+pub(crate) fn stop_all_hold_loops() {
+    if let Ok(mut stops) = hold_loop_stops().lock() {
+        for flag in stops.values() {
+            flag.store(true, Ordering::Relaxed);
+        }
+        stops.clear();
+    }
+    crate::gamepad::clear_extra_buttons();
+}
+
+/// 按住触发键期间循环执行序列；若已在运行则保持（幂等）
+fn start_hold_loop(key_name: &str, params: HoldLoopParams) {
+    if let Ok(stops) = hold_loop_stops().lock() {
+        if stops.contains_key(key_name) {
+            return;
+        }
+    }
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    {
+        if let Ok(mut stops) = hold_loop_stops().lock() {
+            if stops.contains_key(key_name) {
+                return;
+            }
+            stops.insert(key_name.to_string(), stop_flag.clone());
+        }
+    }
+
+    let key_name_owned = key_name.to_string();
+    thread::spawn(move || {
+        log::info!("按住循环启动: {}", key_name_owned);
+
+        // 定时键先发：按下触发键后立刻执行 every，再开始 steps 循环
+        for interval in &params.every {
+            if stop_flag.load(Ordering::Relaxed) {
+                break;
+            }
+            if let Err(e) = super::executor::execute_interval_action(interval, Some(&stop_flag)) {
+                log::warn!("定时按键首次执行失败 ({}): {}", interval.key, e);
+            }
+        }
+
+        for interval in params.every.clone() {
+            let interval_stop = stop_flag.clone();
+            thread::spawn(move || {
+                while !interval_stop.load(Ordering::Relaxed) {
+                    let mut slept = 0u64;
+                    while slept < interval.interval_ms {
+                        if interval_stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let chunk = (interval.interval_ms - slept).min(10);
+                        thread::sleep(std::time::Duration::from_millis(chunk));
+                        slept += chunk;
+                    }
+                    if interval_stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if let Err(e) = super::executor::execute_interval_action(&interval, Some(&interval_stop)) {
+                        log::warn!("定时按键失败 ({}): {}", interval.key, e);
+                    }
+                }
+            });
+        }
+
+        while !stop_flag.load(Ordering::Relaxed) {
+            if let Err(e) = crate::macros::execute_steps(&params.steps, Some(&stop_flag)) {
+                log::warn!("按住循环执行失败 ({}): {}", key_name_owned, e);
+                break;
+            }
+            if params.steps.is_empty() {
+                thread::sleep(std::time::Duration::from_millis(16));
+            }
+        }
+
+        crate::gamepad::clear_extra_buttons();
+        if let Ok(mut stops) = hold_loop_stops().lock() {
+            if stops.get(&key_name_owned).map(|f| Arc::ptr_eq(f, &stop_flag)).unwrap_or(false) {
+                stops.remove(&key_name_owned);
+            }
+        }
+        log::info!("按住循环结束: {}", key_name_owned);
     });
 }
 
@@ -179,7 +281,31 @@ pub fn start_gamepad_forwarder(gamepad_receiver: Receiver<GamepadEvent>, macro_s
 
 /// 执行热键动作（按下阶段）
 fn execute_hotkey_action(key_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // 检查并设置状态
+    let config = get_config().ok_or("配置未加载")?;
+
+    log::debug!("查找热键配置: {}", key_name);
+    let hotkey_config = config.find_hotkey(key_name)
+        .ok_or_else(|| {
+            log::debug!("未找到热键配置: {}，可用热键: {:?}", key_name,
+                config.hotkeys.iter().map(|h| h.key()).collect::<Vec<_>>());
+            format!("未找到热键配置: {}", key_name)
+        })?;
+
+    // 按住循环：按下即启动后台线程，不占用 Executing 相位
+    if hotkey_config.action == "hold_loop" {
+        if let ActionParams::HoldLoop(params) = &hotkey_config.params {
+            start_hold_loop(key_name, params.clone());
+        }
+        return Ok(());
+    }
+
+    if hotkey_config.action == "auto_repeat" {
+        if let ActionParams::AutoRepeat(params) = &hotkey_config.params {
+            start_auto_repeat(key_name, params.clone());
+        }
+        return Ok(());
+    }
+
     let can_execute = {
         let phase = get_macro_phase();
         if phase == MacroPhase::Idle {
@@ -189,24 +315,11 @@ fn execute_hotkey_action(key_name: &str) -> Result<(), Box<dyn std::error::Error
             false
         }
     };
-    
+
     if !can_execute {
         return Ok(());
     }
-    
-    // 获取配置
-    let config = get_config().ok_or("配置未加载")?;
-    
-    // 查找热键配置
-    log::debug!("查找热键配置: {}", key_name);
-    let hotkey_config = config.find_hotkey(key_name)
-        .ok_or_else(|| {
-            log::debug!("未找到热键配置: {}，可用热键: {:?}", key_name, 
-                config.hotkeys.iter().map(|h| h.key()).collect::<Vec<_>>());
-            format!("未找到热键配置: {}", key_name)
-        })?;
-    
-    // 执行动作
+
     match hotkey_config.action.as_str() {
         "type_text" => {
             if let ActionParams::TypeText(params) = &hotkey_config.params {
@@ -222,12 +335,25 @@ fn execute_hotkey_action(key_name: &str) -> Result<(), Box<dyn std::error::Error
             return Err(format!("未知的动作类型: {}", hotkey_config.action).into());
         }
     }
-    
+
     Ok(())
 }
 
 /// 执行热键释放（清理阶段）
-fn execute_hotkey_release(_key_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn execute_hotkey_release(key_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(config) = get_config() {
+        if let Some(hotkey) = config.find_hotkey(key_name) {
+            if hotkey.action == "hold_loop" {
+                stop_hold_loop(key_name);
+                return Ok(());
+            }
+            if hotkey.action == "auto_repeat" {
+                stop_auto_repeat(key_name);
+                return Ok(());
+            }
+        }
+    }
+
     let should_release = {
         let phase = get_macro_phase();
         if phase == MacroPhase::Executing {
@@ -237,14 +363,11 @@ fn execute_hotkey_release(_key_name: &str) -> Result<(), Box<dyn std::error::Err
             false
         }
     };
-    
+
     if !should_release {
         return Ok(());
     }
-    
-    // 这里可以添加释放按键的逻辑，如果有需要的话
-    // 例如，如果某些键在按下后需要保持，在这里释放
-    
+
     Ok(())
 }
 
@@ -273,17 +396,26 @@ pub unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: windows::Win
                 let key_name = vk_to_key_name(kb_struct.vkCode);
                 
                 if let Some(hotkey) = config.find_hotkey(&key_name) {
-                    // 连发动作：按住持续重复，释放停止
-                    if hotkey.action == "auto_repeat" {
+                    // 连发 / 按住循环：按住持续重复，释放停止
+                    if hotkey.action == "auto_repeat" || hotkey.action == "hold_loop" {
                         if keyboard::is_key_down(wparam) {
-                            // 按下（含重复事件）启动/保持连发线程
-                            if let ActionParams::AutoRepeat(params) = &hotkey.params {
-                                start_auto_repeat(&key_name, params.clone());
+                            match &hotkey.params {
+                                ActionParams::AutoRepeat(params) => {
+                                    start_auto_repeat(&key_name, params.clone());
+                                }
+                                ActionParams::HoldLoop(params) => {
+                                    start_hold_loop(&key_name, params.clone());
+                                }
+                                _ => {}
                             }
-                            return LRESULT(1); // 阻止原始事件，避免触发键本身生效
+                            return LRESULT(1);
                         } else if keyboard::is_key_up(wparam) {
-                            stop_auto_repeat(&key_name);
-                            return LRESULT(1); // 阻止原始事件
+                            if hotkey.action == "auto_repeat" {
+                                stop_auto_repeat(&key_name);
+                            } else {
+                                stop_hold_loop(&key_name);
+                            }
+                            return LRESULT(1);
                         }
                     }
                     

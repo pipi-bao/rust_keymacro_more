@@ -5,7 +5,7 @@
 mod executor;
 mod handler;
 
-pub use executor::{execute_type_text, execute_sequence, execute_auto_repeat_once};
+pub use executor::{execute_type_text, execute_sequence, execute_auto_repeat_once, execute_steps};
 pub use handler::{keyboard_hook_proc, MacroEvent, MacroPhase, start_gamepad_forwarder};
 
 use std::sync::{Mutex, mpsc::Sender};
@@ -34,8 +34,10 @@ static CONFIG: Lazy<Mutex<Option<Config>>> = Lazy::new(|| Mutex::new(None));
 ///
 /// 设置低级键盘钩子监听全局键盘事件，启动宏处理线程和手柄监听线程
 pub fn init_keyboard_macro_system(config: Config) -> Option<HHOOK> {
-    // 重新初始化时停止所有活跃连发，避免旧配置的连发线程残留
+    // 重新初始化时停止所有活跃连发/循环，避免旧配置的线程残留
     handler::stop_all_auto_repeats();
+    handler::stop_all_hold_loops();
+    crate::gamepad::apply_output_config(&config);
 
     // 保存配置
     if let Ok(mut config_guard) = CONFIG.lock() {
@@ -63,8 +65,10 @@ pub fn init_keyboard_macro_system(config: Config) -> Option<HHOOK> {
 /// 设置配置（用于运行时重载）
 #[allow(dead_code)]
 pub fn set_config(config: Config) {
-    // 配置变化时停止所有活跃连发，避免旧配置的连发线程继续运行
+    // 配置变化时停止所有活跃连发/循环，避免旧配置的线程继续运行
     handler::stop_all_auto_repeats();
+    handler::stop_all_hold_loops();
+    crate::gamepad::apply_output_config(&config);
     if let Ok(mut config_guard) = CONFIG.lock() {
         *config_guard = Some(config);
     }
@@ -79,6 +83,10 @@ pub fn set_macro_enabled(enabled: bool) {
     if let Ok(mut state) = TOGGLE_STATE.lock() {
         *state = enabled;
     }
+    if !enabled {
+        handler::stop_all_auto_repeats();
+        handler::stop_all_hold_loops();
+    }
 }
 
 /// 切换宏总开关状态（取反）
@@ -87,8 +95,14 @@ pub fn set_macro_enabled(enabled: bool) {
 pub fn toggle_macro_state() {
     if let Ok(mut state) = TOGGLE_STATE.lock() {
         *state = !*state;
-        let msg = if *state { "已启用" } else { "已禁用" };
+        let enabled = *state;
+        let msg = if enabled { "已启用" } else { "已禁用" };
         log::info!("宏状态已通过全局快捷键切换为: {}", msg);
+        if !enabled {
+            drop(state);
+            handler::stop_all_auto_repeats();
+            handler::stop_all_hold_loops();
+        }
     }
 }
 

@@ -33,6 +33,7 @@
 #   - type_text: 输入文本
 #   - sequence: 按键序列
 #   - auto_repeat: 按键连发（DNF 风格：按住触发键，持续重复触发目标按键）
+#   - hold_loop: 按住循环（按住触发键循环执行步骤，松开停止；可用 every 做定时按键）
 #
 # 按键连发（auto_repeat）参数说明：
 #   - key: 连发时模拟的目标按键（如 "A"、"Space"）
@@ -149,12 +150,26 @@ hotkeys:
   #       - type: "mouse_wheel"
   #         delta: 120
   
-  # 示例配置 - 手柄 X 键触发键盘按键
+  # 手柄 X：按下后立刻先发 Y，再循环 LB-RB；之后每 5 秒再发一次 Y
+  # 松开 X 即停止。
+  # 手柄按键通过虚拟 Xbox 360 控制器输出，需安装 ViGEmBus：
+  # https://github.com/nefarius/ViGEmBus/releases
+  # 游戏里请选择新出现的 Xbox 360 Controller（虚拟手柄会透传摇杆/其他实体按键，并屏蔽 X）。
   - type: gamepad
     key: "X"
-    action: "sequence"
+    action: "hold_loop"
     params:
       steps:
-        - type: "key"
-          value: "n"
+        - type: key
+          value: LB
+          device: gamepad
           delay: 50
+        - type: key
+          value: RB
+          device: gamepad
+          delay: 50
+      every:
+        - key: Y
+          interval_ms: 5000
+          press_ms: 50
+          device: gamepad

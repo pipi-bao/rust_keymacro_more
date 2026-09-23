@@ -20,8 +20,9 @@
 - **⚙️ 程序设置** - 可修改全局快捷键，实时生效并支持冲突检测
 - **键盘热键触发** - 支持各种键盘按键作为触发器
 - **手柄按键触发** - 支持 Xbox 协议手柄（有线/无线）
+- **手柄按键输出** - 通过 ViGEmBus 虚拟手柄模拟 LB/RB/X/Y 等按键（需安装驱动）
 - **配置文件驱动** - 通过 YAML 文件定义宏，无需修改代码
-- **多种操作类型** - 支持输入文本、按键序列、按键连发、等待、鼠标操作等
+- **多种操作类型** - 支持输入文本、按键序列、按键连发、按住循环、等待、鼠标操作等
 - **随机延迟** - 支持固定或随机延迟，模拟人工操作
 - **实时日志** - GUI 内置日志查看器，实时监控运行状态
 - **运行时重载** - 无需重启程序即可重新加载配置
@@ -55,8 +56,8 @@ rust_keymacro/
 │   │   ├── mod.rs          # 模块入口（初始化、全局状态管理）
 │   │   ├── executor.rs     # 宏执行器（输入文本、执行序列）
 │   │   └── handler.rs      # 事件处理器（键盘钩子、手柄事件）
-│   ├── gamepad/            # 手柄支持模块
-│   │   └── mod.rs          # 手柄监听线程、按钮映射
+   │   ├── gamepad/            # 手柄支持模块
+   │   │   └── mod.rs          # 手柄监听、ViGEm 虚拟手柄透传/重组
 │   └── winapi/             # Windows API 封装
 │       ├── mod.rs          # 模块入口
 │       ├── keyboard.rs     # 键盘钩子、按键模拟
@@ -110,6 +111,7 @@ rust_keymacro/
 - 📝 按键序列
 - ✍ 输入文本
 - 🔁 按键连发（DNF 风格）
+- 🔄 按住循环（按住触发键循环执行步骤，可定时插入额外按键）
 
 **按键序列编辑器：**
 - 📊 显示步骤数量统计
@@ -228,7 +230,35 @@ hotkeys:
 | `DLeft` | 十字键左 |
 | `DRight` | 十字键右 |
 
-**注意：** 支持国产 Xbox 兼容手柄和官方 Xbox 手柄。
+**注意：** 支持国产 Xbox 兼容手柄和官方 Xbox 手柄。手柄触发只负责**检测**实体按键；若宏要向游戏**模拟**手柄按键，还需安装 ViGEmBus，见下方「虚拟手柄输出」。
+
+## 虚拟手柄输出（ViGEmBus）
+
+Windows 不能把宏按键写回同一只实体 Xbox 手柄。当步骤或定时键使用 `device: gamepad`（或键名为仅手柄存在的 `LB`/`RB` 等）时，程序会创建一只 **虚拟 Xbox 360 控制器**，把实体手柄状态抄过去，再叠上宏按键。
+
+### 原理
+
+- **不是拦截实体手柄。** 实体手柄仍在，游戏也能直接读到它。
+- 程序同时：**读**实体手柄（检测开宏键、抄摇杆/其它按键），**写**到虚拟手柄（透传 + 重组）。
+- 开宏用的触发键（如按住的 `X`）会从虚拟手柄上报中屏蔽，避免游戏也收到该键。
+- 关了本程序后，虚拟手柄不会跟着实体手柄动（或根本不存在）。
+
+### 安装驱动
+
+1. 安装 [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases)
+2. 启动本程序并打开宏总开关（默认 `Ctrl + Alt + Q`）
+3. 让游戏读取虚拟那只 **Xbox 360 Controller**，而不是实体手柄
+
+未安装驱动时，循环仍会运行，但游戏收不到模拟的手柄按键。日志会提示无法创建虚拟手柄。
+
+### 让游戏认虚拟手柄
+
+多数游戏（包括《暗黑破坏神 4》）**没有**「选择绑定哪一只手柄」的设置，通常只认 Windows 的 1 号 XInput 设备。
+
+1. `Win + R` → 输入 `joy.cpl` → **高级** → 把首选设备设成虚拟的 Xbox 360 Controller
+2. 若游戏仍吃实体手柄：用 [HidHide](https://github.com/nefarius/HidHide) 对游戏隐藏实体手柄，只留虚拟那只
+
+首选设备设置**不会**自动把实体按键接到虚拟手柄上，透传由本程序完成。摇杆、扳机、A/B/Y、肩键等按 Xbox 布局原样对应。
 
 ## 支持的操作类型
 
@@ -262,7 +292,8 @@ hotkeys:
 #### 步骤类型
 
 1. **key** - 按键
-   - `value`: 按键名称 (A-Z, 0-9, Space, Enter等)
+   - `value`: 按键名称 (A-Z, 0-9, Space, Enter，或手柄键名 LB/RB/X/Y 等)
+   - `device` (可选): `"keyboard"` 或 `"gamepad"`。`LB`/`RB` 等仅手柄键名默认按手柄输出；`A`/`B`/`X`/`Y` 默认是键盘，模拟手柄时需写 `device: gamepad`
    - `delay` (可选): 按键后等待的毫秒数
      - 固定值: `delay: 50`
      - 随机范围: `delay: { min: 10, max: 30 }`
@@ -392,6 +423,45 @@ hotkeys:
     key: "Space"
     press_ms: 30
     release_ms: 20
+```
+
+### 4. hold_loop - 按住循环
+
+按住触发键期间循环执行步骤，松开即停。可用 `every` 按固定间隔插入额外按键。
+
+**时序：** 按下触发键后，先立刻执行全部 `every` 按键，再开始 `steps` 循环；之后每隔 `interval_ms` 再发一次对应的 `every` 按键。
+
+**参数：**
+- `steps` (必需): 循环步骤，格式与 `sequence` 相同
+- `every` (可选): 定时附加按键数组
+  - `key`: 按键名
+  - `interval_ms`: 间隔毫秒数
+  - `press_ms` (可选): 按下持续时间，默认 20
+  - `device` (可选): `"keyboard"` 或 `"gamepad"`
+
+手柄输出需要 ViGEmBus，见「虚拟手柄输出」。
+
+**示例：** 按住手柄 `X`，立刻先发 `Y`，再循环 `LB`/`RB`，之后每 5 秒再发一次 `Y`。
+
+```yaml
+- type: gamepad
+  key: X
+  action: hold_loop
+  params:
+    steps:
+      - type: key
+        value: LB
+        device: gamepad
+        delay: 50
+      - type: key
+        value: RB
+        device: gamepad
+        delay: 50
+    every:
+      - key: Y
+        interval_ms: 5000
+        press_ms: 50
+        device: gamepad
 ```
 
 ## 配置示例
@@ -537,7 +607,33 @@ hotkeys:
       release_ms: 20
 ```
 
-### 示例 6: 鼠标控制操作
+### 示例 6: 按住循环 + 手柄输出（hold_loop）
+
+按住手柄 `X`：立刻先发 `Y`，再循环 `LB`/`RB`，之后每 5 秒再发一次 `Y`。松开 `X` 停止。需安装 ViGEmBus，并让游戏读取虚拟手柄。
+
+```yaml
+hotkeys:
+  - type: gamepad
+    key: X
+    action: hold_loop
+    params:
+      steps:
+        - type: key
+          value: LB
+          device: gamepad
+          delay: 50
+        - type: key
+          value: RB
+          device: gamepad
+          delay: 50
+      every:
+        - key: Y
+          interval_ms: 5000
+          press_ms: 50
+          device: gamepad
+```
+
+### 示例 7: 鼠标控制操作
 
 使用鼠标控制功能实现自动化操作：
 
@@ -688,6 +784,14 @@ rust_keymacro.exe
 3. 确保手柄是 Xbox 兼容协议
 4. 查看 Debug 模式的日志文件了解详细信息
 
+### 虚拟手柄 / 游戏收不到宏按键
+
+1. 确认已安装 [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases)，并重启过电脑
+2. 确认本程序正在运行，且宏总开关已开启
+3. 在 `joy.cpl` 中应能看到额外的 Xbox 360 Controller；将其设为**首选设备**
+4. 游戏若仍认实体手柄（如《暗黑破坏神 4》不能在设置里选设备），用 HidHide 对游戏隐藏实体手柄
+5. Debug 日志中若出现「无法创建虚拟手柄」，说明驱动未装好或权限不足
+
 ### 配置加载失败
 
 1. 检查 YAML 语法是否正确（可使用在线 YAML 验证工具）
@@ -712,7 +816,7 @@ rust_keymacro.exe
 
 - **GUI 框架**: egui + eframe 0.29
 - **热键管理**: global-hotkey 0.6
-- **手柄支持**: gilrs 0.11
+- **手柄支持**: gilrs 0.11、XInput、vigem-client 0.1（虚拟手柄输出）
 - **配置处理**: serde + serde_yaml 0.9
 - **Windows API**: windows 0.58
 - **日志系统**: simplelog 0.12

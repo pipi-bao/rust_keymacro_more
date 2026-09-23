@@ -74,32 +74,36 @@ fn edit_macro_detail(
         ui.add_space(10.0);
         ui.separator();
         
-        // 动作类型选择：序列 / 连发
+        // 动作类型选择：序列 / 连发 / 按住循环
         ui.label("动作类型:");
-        let is_auto_repeat = {
-            if let Some(hotkey) = editor.config.hotkeys.get(idx) {
-                hotkey.action == "auto_repeat"
-            } else {
-                false
-            }
-        };
-        let mut new_is_auto_repeat = is_auto_repeat;
+        let current_action = editor.config.hotkeys.get(idx)
+            .map(|h| h.action.as_str())
+            .unwrap_or("sequence")
+            .to_string();
+        let mut new_action = current_action.clone();
         ui.horizontal(|ui| {
-            ui.radio_value(&mut new_is_auto_repeat, false, "📝 按键序列");
-            ui.radio_value(&mut new_is_auto_repeat, true, "🔁 按键连发");
+            ui.radio_value(&mut new_action, "sequence".to_string(), "📝 按键序列");
+            ui.radio_value(&mut new_action, "auto_repeat".to_string(), "🔁 按键连发");
+            ui.radio_value(&mut new_action, "hold_loop".to_string(), "🔄 按住循环");
         });
-        if new_is_auto_repeat != is_auto_repeat {
-            // 切换动作类型
+        if new_action != current_action {
             if let Some(hotkey) = editor.config.hotkeys.get_mut(idx) {
-                if new_is_auto_repeat {
-                    hotkey.action = "auto_repeat".to_string();
-                    if !matches!(hotkey.params, ActionParams::AutoRepeat(_)) {
-                        hotkey.params = ActionParams::AutoRepeat(AutoRepeatParams::default());
+                hotkey.action = new_action.clone();
+                match new_action.as_str() {
+                    "auto_repeat" => {
+                        if !matches!(hotkey.params, ActionParams::AutoRepeat(_)) {
+                            hotkey.params = ActionParams::AutoRepeat(AutoRepeatParams::default());
+                        }
                     }
-                } else {
-                    hotkey.action = "sequence".to_string();
-                    if !matches!(hotkey.params, ActionParams::Sequence(_)) {
-                        hotkey.params = ActionParams::Sequence(SequenceParams { steps: vec![] });
+                    "hold_loop" => {
+                        if !matches!(hotkey.params, ActionParams::HoldLoop(_)) {
+                            hotkey.params = ActionParams::HoldLoop(HoldLoopParams::default());
+                        }
+                    }
+                    _ => {
+                        if !matches!(hotkey.params, ActionParams::Sequence(_)) {
+                            hotkey.params = ActionParams::Sequence(SequenceParams { steps: vec![] });
+                        }
                     }
                 }
                 editor.config_changed = true;
@@ -108,11 +112,18 @@ fn edit_macro_detail(
 
         ui.add_space(5.0);
 
-        // 根据动作类型显示对应编辑器
-        if new_is_auto_repeat {
-            edit_auto_repeat_action(editor, ui, idx, status_message, log_messages);
-        } else {
-            super::step_editor::edit_sequence_action(editor, ui, idx, status_message, log_messages);
+        match new_action.as_str() {
+            "auto_repeat" => {
+                edit_auto_repeat_action(editor, ui, idx, status_message, log_messages);
+            }
+            "hold_loop" => {
+                ui.label("🔄 按住触发键期间循环执行下列步骤，松开即停");
+                super::step_editor::edit_sequence_action(editor, ui, idx, status_message, log_messages);
+                edit_hold_loop_every(editor, ui, idx);
+            }
+            _ => {
+                super::step_editor::edit_sequence_action(editor, ui, idx, status_message, log_messages);
+            }
         }
     });
 }
@@ -171,6 +182,61 @@ fn edit_auto_repeat_action(
     }
 }
 
+/// 编辑按住循环的定时附加按键
+fn edit_hold_loop_every(editor: &mut VisualEditor, ui: &mut egui::Ui, idx: usize) {
+    ui.add_space(8.0);
+    ui.separator();
+    ui.label("⏱ 定时附加按键（循环期间按间隔触发）");
+
+    let mut remove_at: Option<usize> = None;
+    if let ActionParams::HoldLoop(params) = &mut editor.config.hotkeys[idx].params {
+        for (i, action) in params.every.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!("#{}", i + 1));
+                let resp_key = ui.add(egui::TextEdit::singleline(&mut action.key).desired_width(50.0));
+                ui.label("每");
+                let resp_int = ui.add(egui::DragValue::new(&mut action.interval_ms).range(100..=600000).speed(100.0));
+                ui.label("ms");
+                ui.label("按下");
+                let resp_press = ui.add(egui::DragValue::new(&mut action.press_ms).range(1..=1000).speed(1.0));
+                ui.label("ms");
+                let mut is_gamepad = action.device.as_deref() == Some("gamepad");
+                let old = is_gamepad;
+                ui.checkbox(&mut is_gamepad, "🎮 手柄");
+                if is_gamepad != old {
+                    action.device = if is_gamepad { Some("gamepad".to_string()) } else { None };
+                    editor.config_changed = true;
+                }
+                if resp_key.changed() || resp_int.changed() || resp_press.changed() {
+                    editor.config_changed = true;
+                }
+                if ui.small_button("🗑").clicked() {
+                    remove_at = Some(i);
+                }
+            });
+        }
+
+        if ui.button("➕ 添加定时按键").clicked() {
+            params.every.push(IntervalAction {
+                key: "X".to_string(),
+                interval_ms: 5000,
+                press_ms: 50,
+                device: Some("gamepad".to_string()),
+            });
+            editor.config_changed = true;
+        }
+    }
+
+    if let Some(i) = remove_at {
+        if let ActionParams::HoldLoop(params) = &mut editor.config.hotkeys[idx].params {
+            if i < params.every.len() {
+                params.every.remove(i);
+                editor.config_changed = true;
+            }
+        }
+    }
+}
+
 /// 自动应用触发配置（仅在值真正变化时触发更新）
 fn apply_trigger_config(editor: &mut VisualEditor, idx: usize) {
     if let Some(hotkey) = editor.config.hotkeys.get_mut(idx) {
@@ -200,6 +266,11 @@ fn apply_trigger_config(editor: &mut VisualEditor, idx: usize) {
                 "auto_repeat" => {
                     if !matches!(hotkey.params, ActionParams::AutoRepeat(_)) {
                         hotkey.params = ActionParams::AutoRepeat(AutoRepeatParams::default());
+                    }
+                }
+                "hold_loop" => {
+                    if !matches!(hotkey.params, ActionParams::HoldLoop(_)) {
+                        hotkey.params = ActionParams::HoldLoop(HoldLoopParams::default());
                     }
                 }
                 _ => {

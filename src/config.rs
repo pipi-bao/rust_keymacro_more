@@ -3,7 +3,7 @@
 //! 支持从 YAML 文件加载键盘宏配置
 
 use rand::Rng;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fs;
 use std::path::Path;
 
@@ -113,15 +113,49 @@ impl TriggerSource {
 }
 
 /// 单个热键配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct HotkeyConfig {
     /// 触发源配置（新格式）
     #[serde(flatten)]
     pub trigger: TriggerSource,
-    /// 操作类型："type_text" 或 "sequence"
+    /// 操作类型："type_text" / "sequence" / "auto_repeat" / "hold_loop"
     pub action: String,
     /// 操作参数
     pub params: ActionParams,
+}
+
+impl<'de> Deserialize<'de> for HotkeyConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(flatten)]
+            trigger: TriggerSource,
+            action: String,
+            params: serde_yaml::Value,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        let params = match raw.action.as_str() {
+            "type_text" => ActionParams::TypeText(
+                serde_yaml::from_value(raw.params).map_err(serde::de::Error::custom)?,
+            ),
+            "auto_repeat" => ActionParams::AutoRepeat(
+                serde_yaml::from_value(raw.params).map_err(serde::de::Error::custom)?,
+            ),
+            "hold_loop" => ActionParams::HoldLoop(
+                serde_yaml::from_value(raw.params).map_err(serde::de::Error::custom)?,
+            ),
+            _ => ActionParams::Sequence(
+                serde_yaml::from_value(raw.params).map_err(serde::de::Error::custom)?,
+            ),
+        };
+
+        Ok(HotkeyConfig {
+            trigger: raw.trigger,
+            action: raw.action,
+            params,
+        })
+    }
 }
 
 impl HotkeyConfig {
@@ -136,8 +170,29 @@ impl HotkeyConfig {
 #[serde(untagged)]
 pub enum ActionParams {
     TypeText(TypeTextParams),
-    Sequence(SequenceParams),
     AutoRepeat(AutoRepeatParams),
+    HoldLoop(HoldLoopParams),
+    Sequence(SequenceParams),
+}
+
+impl ActionParams {
+    /// 取出可编辑的步骤列表（sequence / hold_loop）
+    pub fn steps(&self) -> Option<&Vec<Step>> {
+        match self {
+            ActionParams::Sequence(p) => Some(&p.steps),
+            ActionParams::HoldLoop(p) => Some(&p.steps),
+            _ => None,
+        }
+    }
+
+    /// 取出可编辑的步骤列表（sequence / hold_loop）
+    pub fn steps_mut(&mut self) -> Option<&mut Vec<Step>> {
+        match self {
+            ActionParams::Sequence(p) => Some(&mut p.steps),
+            ActionParams::HoldLoop(p) => Some(&mut p.steps),
+            _ => None,
+        }
+    }
 }
 
 fn default_press_ms() -> u64 { 20 }
@@ -178,6 +233,36 @@ pub struct TypeTextParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SequenceParams {
     pub steps: Vec<Step>,
+}
+
+/// 按住触发键期间循环执行序列，并可选按固定间隔插入额外按键
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HoldLoopParams {
+    pub steps: Vec<Step>,
+    /// 循环期间按固定间隔触发的附加按键（如每 5 秒按一次 X）
+    #[serde(default)]
+    pub every: Vec<IntervalAction>,
+}
+
+impl Default for HoldLoopParams {
+    fn default() -> Self {
+        Self {
+            steps: Vec::new(),
+            every: Vec::new(),
+        }
+    }
+}
+
+/// 循环期间的定时按键
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntervalAction {
+    pub key: String,
+    pub interval_ms: u64,
+    #[serde(default = "default_press_ms")]
+    pub press_ms: u64,
+    /// "keyboard" 或 "gamepad"；缺省时按键名判断
+    #[serde(default)]
+    pub device: Option<String>,
 }
 
 /// 按键动作类型
@@ -229,6 +314,9 @@ pub enum Step {
         delay: Option<DelayConfig>,
         #[serde(default)]
         action: Option<KeyAction>,
+        /// "keyboard" 或 "gamepad"；缺省时 LB/RB 等仅手柄键名按手柄处理
+        #[serde(default)]
+        device: Option<String>,
     },
     Wait { 
         value: u64,
@@ -350,6 +438,43 @@ impl Config {
     pub fn find_hotkey(&self, key: &str) -> Option<&HotkeyConfig> {
         self.hotkeys.iter().find(|h| h.trigger.matches(key))
     }
+
+    /// 是否需要虚拟手柄输出（hold_loop 中含手柄按键）
+    pub fn needs_virtual_gamepad(&self) -> bool {
+        self.hotkeys.iter().any(|h| match &h.params {
+            ActionParams::HoldLoop(p) => {
+                p.steps.iter().any(step_uses_gamepad)
+                    || p.every.iter().any(|a| uses_gamepad_device(a.device.as_deref(), &a.key))
+            }
+            _ => false,
+        })
+    }
+
+}
+
+/// 仅手柄存在、键盘没有同名键的按钮
+pub fn is_exclusive_gamepad_button(name: &str) -> bool {
+    matches!(
+        name.to_ascii_uppercase().as_str(),
+        "LB" | "RB" | "LT" | "RT" | "START" | "BACK" | "GUIDE" | "LS" | "RS"
+            | "DUP" | "DDOWN" | "DLEFT" | "DRIGHT"
+    )
+}
+
+/// 根据 device 字段和键名判断是否走手柄输出
+pub fn uses_gamepad_device(device: Option<&str>, key: &str) -> bool {
+    match device {
+        Some(d) if d.eq_ignore_ascii_case("gamepad") => true,
+        Some(d) if d.eq_ignore_ascii_case("keyboard") => false,
+        _ => is_exclusive_gamepad_button(key),
+    }
+}
+
+fn step_uses_gamepad(step: &Step) -> bool {
+    match step {
+        Step::Key { value, device, .. } => uses_gamepad_device(device.as_deref(), value),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -429,7 +554,7 @@ hotkeys:
         if let ActionParams::Sequence(params) = &hotkey.params {
             assert_eq!(params.steps.len(), 3);
             match &params.steps[0] {
-                Step::Key { value, delay, action } => {
+                Step::Key { value, delay, action, .. } => {
                     assert_eq!(value, "a");
                     assert!(matches!(delay, Some(DelayConfig::Fixed(50))));
                     assert_eq!(*action, None); // 默认值为 None，会使用 KeyAction::Complete
@@ -532,6 +657,49 @@ hotkeys:
         } else {
             panic!("Expected AutoRepeat params");
         }
+    }
+
+    #[test]
+    fn test_parse_hold_loop_config() {
+        let yaml = r#"
+hotkeys:
+  - type: gamepad
+    key: Y
+    action: hold_loop
+    params:
+      steps:
+        - { type: key, value: LB, device: gamepad, delay: 50 }
+        - { type: key, value: RB, device: gamepad, delay: 50 }
+      every:
+        - key: X
+          interval_ms: 5000
+          device: gamepad
+          press_ms: 40
+"#;
+        let config = Config::from_str(yaml).unwrap();
+        assert_eq!(config.hotkeys.len(), 1);
+        assert_eq!(config.hotkeys[0].action, "hold_loop");
+        match &config.hotkeys[0].trigger {
+            TriggerSource::Gamepad { key } => assert_eq!(key, "Y"),
+            _ => panic!("Expected Gamepad trigger"),
+        }
+        if let ActionParams::HoldLoop(params) = &config.hotkeys[0].params {
+            assert_eq!(params.steps.len(), 2);
+            assert_eq!(params.every.len(), 1);
+            assert_eq!(params.every[0].key, "X");
+            assert_eq!(params.every[0].interval_ms, 5000);
+            assert_eq!(params.every[0].press_ms, 40);
+            match &params.steps[0] {
+                Step::Key { value, device, .. } => {
+                    assert_eq!(value, "LB");
+                    assert_eq!(device.as_deref(), Some("gamepad"));
+                }
+                _ => panic!("Expected Key step"),
+            }
+        } else {
+            panic!("Expected HoldLoop params");
+        }
+        assert!(config.needs_virtual_gamepad());
     }
 
     #[test]

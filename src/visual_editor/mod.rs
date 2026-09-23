@@ -34,6 +34,8 @@ pub struct VisualEditor {
     pub key_selector_step_idx: usize,
     /// 正在编辑的步骤键值
     pub step_editing_key: String,
+    /// 步骤按键选择器是否显示手柄键位
+    pub key_selector_for_gamepad: bool,
 }
 
 impl VisualEditor {
@@ -51,6 +53,7 @@ impl VisualEditor {
             key_selector_macro_idx: 0,
             key_selector_step_idx: 0,
             step_editing_key: String::new(),
+            key_selector_for_gamepad: false,
         }
     }
     
@@ -102,8 +105,12 @@ impl VisualEditor {
         let mut open = true;
         let is_keyboard = self.edit_is_keyboard;
         let is_for_step = self.key_selector_for_step;
+        let step_uses_gamepad = is_for_step && self.key_selector_for_gamepad;
+        let show_gamepad = if is_for_step { step_uses_gamepad } else { !is_keyboard };
 
-        let title = if is_for_step {
+        let title = if is_for_step && step_uses_gamepad {
+            "选择步骤按键（手柄）"
+        } else if is_for_step {
             "选择步骤按键（键盘）"
         } else if is_keyboard {
             "选择键盘按键"
@@ -124,10 +131,10 @@ impl VisualEditor {
                 } else {
                     self.edit_gamepad_key.clone()
                 };
-                let selected = if is_keyboard || is_for_step {
-                    key_selector::show_keyboard_content(ui, &mut key)
-                } else {
+                let selected = if show_gamepad {
                     key_selector::show_gamepad_content(ui, &mut key)
+                } else {
+                    key_selector::show_keyboard_content(ui, &mut key)
                 };
                 if selected {
                     if is_for_step {
@@ -141,14 +148,14 @@ impl VisualEditor {
                                     self.config_changed = true;
                                 }
                             }
-                        } else if let Some(params) = self.config.hotkeys.get_mut(self.key_selector_macro_idx)
-                            .and_then(|h| match &mut h.params {
-                                ActionParams::Sequence(p) => Some(p),
-                                _ => None,
-                            })
+                        } else if let Some(steps) = self.config.hotkeys.get_mut(self.key_selector_macro_idx)
+                            .and_then(|h| h.params.steps_mut())
                         {
-                            if let Some(Step::Key { value, .. }) = params.steps.get_mut(self.key_selector_step_idx) {
+                            if let Some(Step::Key { value, device, .. }) = steps.get_mut(self.key_selector_step_idx) {
                                 *value = self.step_editing_key.clone();
+                                if step_uses_gamepad {
+                                    *device = Some("gamepad".to_string());
+                                }
                                 self.config_changed = true;
                             }
                         }

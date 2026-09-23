@@ -39,7 +39,11 @@ pub fn show_macro_list(
                     };
                     
                     // 构建显示文本（根据动作类型显示不同标记）
-                    let action_label = if hotkey.action == "auto_repeat" { "🔁 连发" } else { "📝 序列" };
+                    let action_label = match hotkey.action.as_str() {
+                        "auto_repeat" => "🔁 连发",
+                        "hold_loop" => "🔄 循环",
+                        _ => "📝 序列",
+                    };
                     let display_text = format!(
                         "{} {} → {}",
                         if is_keyboard { "⌨" } else { "🎮" },
