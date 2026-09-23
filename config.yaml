@@ -29,6 +29,10 @@
 # Wait 步骤支持随机等待:
 #   - random: true 表示在 0 ~ value 之间随机等待
 #
+# 单个宏开关（enabled）：
+#   - 默认 true（省略该字段也视为启用）
+#   - 设为 false 可单独关闭此宏，不影响其他宏，也不影响全局总开关
+#
 # 操作类型（action）：
 #   - type_text: 输入文本
 #   - sequence: 按键序列
@@ -157,6 +161,7 @@ hotkeys:
   # 游戏里请选择新出现的 Xbox 360 Controller（虚拟手柄会透传摇杆/其他实体按键，并屏蔽 X）。
   - type: gamepad
     key: "X"
+    enabled: true
     action: "hold_loop"
     params:
       steps:

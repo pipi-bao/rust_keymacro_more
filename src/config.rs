@@ -118,6 +118,9 @@ pub struct HotkeyConfig {
     /// 触发源配置（新格式）
     #[serde(flatten)]
     pub trigger: TriggerSource,
+    /// 是否启用此宏（默认 true）。全局总开关关闭时，即使这里为 true 也不会触发。
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
     /// 操作类型："type_text" / "sequence" / "auto_repeat" / "hold_loop"
     pub action: String,
     /// 操作参数
@@ -130,6 +133,8 @@ impl<'de> Deserialize<'de> for HotkeyConfig {
         struct Raw {
             #[serde(flatten)]
             trigger: TriggerSource,
+            #[serde(default = "default_enabled")]
+            enabled: bool,
             action: String,
             params: serde_yaml::Value,
         }
@@ -152,6 +157,7 @@ impl<'de> Deserialize<'de> for HotkeyConfig {
 
         Ok(HotkeyConfig {
             trigger: raw.trigger,
+            enabled: raw.enabled,
             action: raw.action,
             params,
         })
@@ -195,6 +201,7 @@ impl ActionParams {
     }
 }
 
+fn default_enabled() -> bool { true }
 fn default_press_ms() -> u64 { 20 }
 fn default_release_ms() -> u64 { 30 }
 
@@ -439,9 +446,9 @@ impl Config {
         self.hotkeys.iter().find(|h| h.trigger.matches(key))
     }
 
-    /// 是否需要虚拟手柄输出（hold_loop 中含手柄按键）
+    /// 是否需要虚拟手柄输出（已启用的 hold_loop 中含手柄按键）
     pub fn needs_virtual_gamepad(&self) -> bool {
-        self.hotkeys.iter().any(|h| match &h.params {
+        self.hotkeys.iter().filter(|h| h.enabled).any(|h| match &h.params {
             ActionParams::HoldLoop(p) => {
                 p.steps.iter().any(step_uses_gamepad)
                     || p.every.iter().any(|a| uses_gamepad_device(a.device.as_deref(), &a.key))
@@ -700,6 +707,31 @@ hotkeys:
             panic!("Expected HoldLoop params");
         }
         assert!(config.needs_virtual_gamepad());
+        assert!(config.hotkeys[0].enabled);
+    }
+
+    #[test]
+    fn test_macro_enabled_flag() {
+        let yaml = r#"
+hotkeys:
+  - type: keyboard
+    key: F1
+    action: sequence
+    params:
+      steps: []
+  - type: gamepad
+    key: X
+    enabled: false
+    action: hold_loop
+    params:
+      steps:
+        - { type: key, value: LB, device: gamepad, delay: 50 }
+"#;
+        let config = Config::from_str(yaml).unwrap();
+        assert_eq!(config.hotkeys.len(), 2);
+        assert!(config.hotkeys[0].enabled);
+        assert!(!config.hotkeys[1].enabled);
+        assert!(!config.needs_virtual_gamepad());
     }
 
     #[test]

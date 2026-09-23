@@ -291,6 +291,11 @@ fn execute_hotkey_action(key_name: &str) -> Result<(), Box<dyn std::error::Error
             format!("未找到热键配置: {}", key_name)
         })?;
 
+    if !hotkey_config.enabled {
+        log::debug!("热键已单独禁用，跳过: {}", key_name);
+        return Ok(());
+    }
+
     // 按住循环：按下即启动后台线程，不占用 Executing 相位
     if hotkey_config.action == "hold_loop" {
         if let ActionParams::HoldLoop(params) = &hotkey_config.params {
@@ -396,6 +401,9 @@ pub unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: windows::Win
                 let key_name = vk_to_key_name(kb_struct.vkCode);
                 
                 if let Some(hotkey) = config.find_hotkey(&key_name) {
+                    if !hotkey.enabled {
+                        return keyboard::call_next_hook(HHOOK::default(), code, wparam, lparam);
+                    }
                     // 连发 / 按住循环：按住持续重复，释放停止
                     if hotkey.action == "auto_repeat" || hotkey.action == "hold_loop" {
                         if keyboard::is_key_down(wparam) {

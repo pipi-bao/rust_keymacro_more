@@ -38,6 +38,22 @@ fn edit_macro_detail(
 ) {
     ui.vertical(|ui| {
         ui.label(format!("编辑宏 #{}", idx + 1));
+        ui.horizontal(|ui| {
+            let mut enabled = editor.config.hotkeys[idx].enabled;
+            if ui.checkbox(&mut enabled, "启用此宏").changed() {
+                editor.config.hotkeys[idx].enabled = enabled;
+                editor.config_changed = true;
+                let msg = if enabled { "已启用此宏" } else { "已禁用此宏（全局开关打开时也不会触发）" };
+                *status_message = msg.to_string();
+                log_messages.push(format!("[INFO] {}", msg));
+            }
+            if !enabled {
+                ui.colored_label(
+                    egui::Color32::from_rgb(180, 60, 60),
+                    "已禁用",
+                );
+            }
+        });
         ui.separator();
         
         // 触发源类型

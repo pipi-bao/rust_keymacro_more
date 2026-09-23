@@ -34,7 +34,7 @@ pub fn apply_output_config(config: &Config) {
     let suppress = config
         .hotkeys
         .iter()
-        .filter(|h| h.action == "hold_loop")
+        .filter(|h| h.enabled && h.action == "hold_loop")
         .filter_map(|h| match &h.trigger {
             TriggerSource::Gamepad { key } => button_name_to_mask(key),
             _ => None,

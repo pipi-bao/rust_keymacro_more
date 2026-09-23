@@ -32,6 +32,7 @@ pub fn show_macro_list(
                     
                     // 获取触发源信息
                     let hotkey = &editor.config.hotkeys[i];
+                    let is_enabled = hotkey.enabled;
                     let is_keyboard = matches!(&hotkey.trigger, TriggerSource::Keyboard { .. });
                     let current_key = match &hotkey.trigger {
                         TriggerSource::Keyboard { key } => key.clone(),
@@ -51,18 +52,41 @@ pub fn show_macro_list(
                         action_label,
                     );
                     
-                    // 使用带背景的按钮，点击选中宏
-                    let mut button = egui::Button::new(display_text);
-                    
-                    if is_selected {
-                        button = button.fill(ui.style().visuals.selection.bg_fill);
-                    }
-                    
-                    if ui.add(button).clicked() {
-                        editor.selected_macro = Some(i);
-                        // 加载选中宏的编辑状态
-                        editor.load_edit_state(i);
-                    }
+                    ui.horizontal(|ui| {
+                        let mut enabled = is_enabled;
+                        if ui.checkbox(&mut enabled, "")
+                            .on_hover_text(if enabled { "禁用此宏（不影响全局总开关）" } else { "启用此宏" })
+                            .changed()
+                        {
+                            editor.config.hotkeys[i].enabled = enabled;
+                            editor.config_changed = true;
+                            let msg = if enabled {
+                                format!("已启用宏: {} {}", if is_keyboard { "键盘" } else { "手柄" }, current_key)
+                            } else {
+                                format!("已禁用宏: {} {}", if is_keyboard { "键盘" } else { "手柄" }, current_key)
+                            };
+                            *status_message = msg.clone();
+                            log_messages.push(format!("[INFO] {}", msg));
+                        }
+
+                        let label = if is_enabled {
+                            egui::RichText::new(display_text)
+                        } else {
+                            egui::RichText::new(format!("⏸ {}", display_text))
+                                .color(ui.style().visuals.weak_text_color())
+                        };
+                        let mut button = egui::Button::new(label);
+                        
+                        if is_selected {
+                            button = button.fill(ui.style().visuals.selection.bg_fill);
+                        }
+                        
+                        if ui.add(button).clicked() {
+                            editor.selected_macro = Some(i);
+                            // 加载选中宏的编辑状态
+                            editor.load_edit_state(i);
+                        }
+                    });
                 }
             });
         
@@ -84,6 +108,7 @@ fn show_macro_buttons(
         if ui.button("➕ 添加").clicked() {
             editor.config.hotkeys.push(HotkeyConfig {
                 trigger: TriggerSource::Keyboard { key: "F1".to_string() },
+                enabled: true,
                 action: "sequence".to_string(),
                 params: ActionParams::Sequence(SequenceParams {
                     steps: vec![],
