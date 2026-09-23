@@ -7,7 +7,7 @@ pub mod settings;
 
 use eframe::egui;
 use crate::config::{Config, GlobalHotkeyConfig};
-use crate::macros::{init_keyboard_macro_system, set_macro_enabled, cleanup_keyboard_hook};
+use crate::macros::{cleanup_keyboard_hook, init_keyboard_macro_system, set_config, set_macro_enabled};
 use crate::visual_editor::VisualEditor;
 use windows::Win32::UI::WindowsAndMessaging::HHOOK;
 
@@ -158,12 +158,7 @@ impl MacroApp {
         
         match std::fs::write(&config_path, &config_text) {
             Ok(_) => {
-                // 清理旧的钩子并重新初始化
-                if let Some(hook) = self.keyboard_hook.take() {
-                    cleanup_keyboard_hook(hook);
-                }
-                self.keyboard_hook = init_keyboard_macro_system(self.config.clone());
-                
+                set_config(self.config.clone());
                 self.has_unsaved_changes = false;
                 self.status_message = format!("✓ 配置已保存到: {}", config_path.display());
                 self.log_messages.push(format!("[INFO] 配置已保存到: {}", config_path.display()));
@@ -244,16 +239,8 @@ impl eframe::App for MacroApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // 检查配置是否已更改，如果是则重新初始化系统
         if self.visual_editor.config_changed {
-            // 同步配置
             self.config = self.visual_editor.config.clone();
-            
-            // 清理旧的钩子并重新初始化
-            if let Some(hook) = self.keyboard_hook.take() {
-                cleanup_keyboard_hook(hook);
-            }
-            self.keyboard_hook = init_keyboard_macro_system(self.config.clone());
-            
-            // 重置标志位
+            set_config(self.config.clone());
             self.visual_editor.config_changed = false;
             self.has_unsaved_changes = true;
             
@@ -399,11 +386,7 @@ fn reload_config(app: &mut MacroApp) {
             app.global_hotkey_cfg = config.global_hotkey.clone()
                 .unwrap_or_else(GlobalHotkeyConfig::default);
             
-            // 清理旧的钩子并重新初始化
-            if let Some(hook) = app.keyboard_hook.take() {
-                cleanup_keyboard_hook(hook);
-            }
-            app.keyboard_hook = init_keyboard_macro_system(config.clone());
+            set_config(config.clone());
 
             // 重新注册全局快捷键（使用配置中的值，set_hotkey 会先注销旧热键）
             let target = match config.global_hotkey.as_ref() {

@@ -8,6 +8,7 @@ mod handler;
 pub use executor::{execute_type_text, execute_sequence, execute_auto_repeat_once, execute_steps};
 pub use handler::{keyboard_hook_proc, MacroEvent, MacroPhase, start_gamepad_forwarder};
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, mpsc::Sender};
 use once_cell::sync::Lazy;
 use windows::Win32::UI::WindowsAndMessaging::HHOOK;
@@ -19,6 +20,7 @@ static TOGGLE_STATE: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 static MACRO_PHASE: Lazy<Mutex<MacroPhase>> = Lazy::new(|| Mutex::new(MacroPhase::Idle));
 static MACRO_EVENT_SENDER: Lazy<Mutex<Option<Sender<MacroEvent>>>> = Lazy::new(|| Mutex::new(None));
 static CONFIG: Lazy<Mutex<Option<Config>>> = Lazy::new(|| Mutex::new(None));
+static SYSTEM_THREADS_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// 初始化键盘宏系统
 ///
@@ -34,24 +36,15 @@ static CONFIG: Lazy<Mutex<Option<Config>>> = Lazy::new(|| Mutex::new(None));
 ///
 /// 设置低级键盘钩子监听全局键盘事件，启动宏处理线程和手柄监听线程
 pub fn init_keyboard_macro_system(config: Config) -> Option<HHOOK> {
-    // 重新初始化时停止所有活跃连发/循环，避免旧配置的线程残留
-    handler::stop_all_auto_repeats();
-    handler::stop_all_hold_loops();
-    crate::gamepad::apply_output_config(&config);
+    set_config(config);
 
-    // 保存配置
-    if let Ok(mut config_guard) = CONFIG.lock() {
-        *config_guard = Some(config);
+    // 保存/应用配置也会走到这里；线程只允许启动一次。
+    // 多开监听会把虚拟手柄的输出再读成输入，RT 序列会自激循环。
+    if !SYSTEM_THREADS_STARTED.swap(true, Ordering::SeqCst) {
+        let macro_sender = handler::start_macro_thread();
+        let gamepad_receiver = start_gamepad_thread();
+        handler::start_gamepad_forwarder(gamepad_receiver, macro_sender);
     }
-
-    // 启动宏处理线程（接收键盘事件）
-    let macro_sender = handler::start_macro_thread();
-
-    // 启动手柄监听线程
-    let gamepad_receiver = start_gamepad_thread();
-
-    // 启动手柄事件转发
-    handler::start_gamepad_forwarder(gamepad_receiver, macro_sender);
 
     match crate::winapi::keyboard::set_keyboard_hook(Some(handler::keyboard_hook_proc), 0) {
         Ok(hook) => Some(hook),
@@ -63,11 +56,10 @@ pub fn init_keyboard_macro_system(config: Config) -> Option<HHOOK> {
 }
 
 /// 设置配置（用于运行时重载）
-#[allow(dead_code)]
 pub fn set_config(config: Config) {
-    // 配置变化时停止所有活跃连发/循环，避免旧配置的线程继续运行
     handler::stop_all_auto_repeats();
     handler::stop_all_hold_loops();
+    crate::gamepad::clear_extra_buttons();
     crate::gamepad::apply_output_config(&config);
     if let Ok(mut config_guard) = CONFIG.lock() {
         *config_guard = Some(config);
@@ -86,6 +78,7 @@ pub fn set_macro_enabled(enabled: bool) {
     if !enabled {
         handler::stop_all_auto_repeats();
         handler::stop_all_hold_loops();
+        crate::gamepad::clear_extra_buttons();
     }
 }
 
@@ -102,6 +95,7 @@ pub fn toggle_macro_state() {
             drop(state);
             handler::stop_all_auto_repeats();
             handler::stop_all_hold_loops();
+            crate::gamepad::clear_extra_buttons();
         }
     }
 }
@@ -124,6 +118,16 @@ pub(crate) fn get_toggle_state() -> bool {
 
 pub(crate) fn get_macro_phase() -> MacroPhase {
     MACRO_PHASE.lock().map(|p| *p).unwrap_or(MacroPhase::Idle)
+}
+
+pub(crate) fn try_enter_executing() -> bool {
+    if let Ok(mut p) = MACRO_PHASE.lock() {
+        if *p == MacroPhase::Idle {
+            *p = MacroPhase::Executing;
+            return true;
+        }
+    }
+    false
 }
 
 pub(crate) fn set_macro_phase(phase: MacroPhase) {

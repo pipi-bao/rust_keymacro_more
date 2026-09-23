@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use crate::config::{ActionParams, AutoRepeatParams, HoldLoopParams};
 use crate::gamepad::GamepadEvent;
-use crate::macros::{get_config, get_event_sender, get_macro_phase, get_toggle_state, set_macro_phase};
+use crate::macros::{get_config, get_event_sender, get_macro_phase, get_toggle_state, set_macro_phase, try_enter_executing};
 
 /// 活跃连发线程的停止标志
 ///
@@ -311,17 +311,7 @@ fn execute_hotkey_action(key_name: &str) -> Result<(), Box<dyn std::error::Error
         return Ok(());
     }
 
-    let can_execute = {
-        let phase = get_macro_phase();
-        if phase == MacroPhase::Idle {
-            set_macro_phase(MacroPhase::Executing);
-            true
-        } else {
-            false
-        }
-    };
-
-    if !can_execute {
+    if !try_enter_executing() {
         return Ok(());
     }
 

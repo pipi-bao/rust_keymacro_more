@@ -3,7 +3,7 @@
 //! 使用 Windows XInput API 支持 Xbox 协议手柄；
 //! 通过 ViGEmBus 创建虚拟手柄，把物理输入与宏按键合并后输出。
 
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::OnceLock;
 use std::thread;
@@ -63,6 +63,16 @@ const TRIGGER_THRESHOLD: u8 = 30;
 static VIGEM_WANTED: AtomicBool = AtomicBool::new(false);
 static VIGEM_WARNED: AtomicBool = AtomicBool::new(false);
 static VIGEM_OWNER: AtomicBool = AtomicBool::new(false);
+/// 虚拟手柄占用的 XInput 槽，-1 表示未知。所有监听线程都必须跳过，否则会把宏输出再读成输入。
+static VIRTUAL_INDEX: AtomicI32 = AtomicI32::new(-1);
+
+fn skip_virtual_slot(index: u32, local: Option<u32>) -> bool {
+    if local == Some(index) {
+        return true;
+    }
+    let stored = VIRTUAL_INDEX.load(Ordering::Relaxed);
+    stored >= 0 && stored as u32 == index
+}
 
 /// 根据配置决定是否启用虚拟手柄，并屏蔽 hold_loop 的物理触发键
 pub fn apply_output_config(config: &Config) {
@@ -187,8 +197,13 @@ pub fn start_gamepad_thread() -> Receiver<GamepadEvent> {
                     .is_ok()
             {
                 match connect_virtual_pad() {
-                    Ok(pad) => {
-                        log::info!("虚拟手柄已就绪，请在游戏中选择该 Xbox 360 控制器");
+                    Ok(mut pad) => {
+                        if let Ok(idx) = pad.get_user_index() {
+                            VIRTUAL_INDEX.store(idx as i32, Ordering::Relaxed);
+                            log::info!("虚拟手柄已就绪（XInput 槽 {}），请在游戏中选择该 Xbox 360 控制器", idx);
+                        } else {
+                            log::info!("虚拟手柄已就绪，请在游戏中选择该 Xbox 360 控制器");
+                        }
                         virtual_pad = Some(pad);
                     }
                     Err(e) => {
@@ -206,11 +221,14 @@ pub fn start_gamepad_thread() -> Receiver<GamepadEvent> {
             let virtual_index = virtual_pad
                 .as_mut()
                 .and_then(|pad| pad.get_user_index().ok());
+            if let Some(idx) = virtual_index {
+                VIRTUAL_INDEX.store(idx as i32, Ordering::Relaxed);
+            }
 
             let mut passthrough: Option<XINPUT_GAMEPAD> = None;
 
             for i in 0..4usize {
-                if virtual_index == Some(i as u32) {
+                if skip_virtual_slot(i as u32, virtual_index) {
                     continue;
                 }
 
