@@ -25,6 +25,13 @@ impl Default for HotkeyCapture {
     }
 }
 
+impl HotkeyCapture {
+    /// 是否正在捕获新的全局快捷键（此时不应拦截 Ctrl+S）
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+}
+
 /// 渲染设置页面
 ///
 /// # 参数

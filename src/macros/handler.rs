@@ -392,6 +392,15 @@ pub unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: windows::Win
         if kb_struct.dwExtraInfo == 0x12345678 {
             return keyboard::call_next_hook(HHOOK::default(), code, wparam, lparam);
         }
+
+        // Ctrl+S 留给 GUI 保存配置，即使 S 被配置为热键也不拦截
+        {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
+            let ctrl_down = GetKeyState(VK_CONTROL.0 as i32) < 0;
+            if ctrl_down && kb_struct.vkCode == 0x53 {
+                return keyboard::call_next_hook(HHOOK::default(), code, wparam, lparam);
+            }
+        }
         
         // 检查宏是否启用
         if get_toggle_state() {

@@ -114,6 +114,7 @@ fn show_macro_buttons(
                     steps: vec![],
                 }),
             });
+            editor.config_changed = true;
             *status_message = "已添加新宏".to_string();
             log_messages.push("[INFO] 添加新宏配置".to_string());
         }
@@ -123,6 +124,7 @@ fn show_macro_buttons(
                 if ui.button("📋 复制").clicked() {
                     let new_macro = editor.config.hotkeys[idx].clone();
                     editor.config.hotkeys.insert(idx + 1, new_macro);
+                    editor.config_changed = true;
                     *status_message = "已复制宏".to_string();
                     log_messages.push("[INFO] 复制宏配置".to_string());
                 }
@@ -130,6 +132,7 @@ fn show_macro_buttons(
                 if ui.button("❌ 删除").clicked() {
                     editor.config.hotkeys.remove(idx);
                     editor.selected_macro = None;
+                    editor.config_changed = true;
                     *status_message = "已删除宏".to_string();
                     log_messages.push("[INFO] 删除宏配置".to_string());
                 }

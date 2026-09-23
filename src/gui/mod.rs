@@ -263,6 +263,14 @@ impl eframe::App for MacroApp {
         
         // 同步全局总开关状态（可能被全局快捷键在后台修改）
         self.macro_enabled = crate::macros::get_toggle_state();
+
+        // Ctrl+S 保存（设置页正在捕获快捷键时不抢按键）
+        if !self.hotkey_capture.is_active() {
+            let save_shortcut = egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::S);
+            if ctx.input_mut(|i| i.consume_shortcut(&save_shortcut)) {
+                self.save_config();
+            }
+        }
         
         // 检查系统关闭请求（点击窗口右上角 X 按钮）
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -326,7 +334,7 @@ impl eframe::App for MacroApp {
 fn show_menu_bar(app: &mut MacroApp, ui: &mut egui::Ui) {
     egui::menu::bar(ui, |ui| {
         ui.menu_button("文件", |ui| {
-            if ui.button("保存配置").clicked() {
+            if ui.button("保存配置    Ctrl+S").clicked() {
                 app.save_config();
                 ui.close_menu();
             }
@@ -347,8 +355,19 @@ fn show_menu_bar(app: &mut MacroApp, ui: &mut egui::Ui) {
                 ui.close_menu();
             }
         });
-        
 
+        let save_label = if app.has_unsaved_changes {
+            "💾 保存 *"
+        } else {
+            "💾 保存"
+        };
+        let save_btn = egui::Button::new(save_label);
+        if ui.add(save_btn).on_hover_text("保存配置到 config.yaml（Ctrl+S）").clicked() {
+            app.save_config();
+        }
+        if app.has_unsaved_changes {
+            ui.colored_label(egui::Color32::from_rgb(180, 100, 0), "未保存");
+        }
         
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let status_color = if app.macro_enabled {
@@ -396,6 +415,7 @@ fn reload_config(app: &mut MacroApp) {
             } else {
                 app.status_message = "✓ 配置已重新加载".to_string();
             }
+            app.has_unsaved_changes = false;
             app.log_messages.push("[INFO] 配置已重新加载".to_string());
         }
         Err(e) => {
