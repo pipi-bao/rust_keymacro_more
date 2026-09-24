@@ -257,7 +257,7 @@ Windows 不能把宏按键写回同一只实体 Xbox 手柄。当步骤或定时
 
 ### 让游戏认虚拟手柄
 
-多数游戏（包括《暗黑破坏神 4》）**没有**「选择绑定哪一只手柄」的设置，通常只认 Windows 的 1 号 XInput 设备。
+多数游戏（包括《暗黑破坏神 4》）**没有**「选择绑定哪一只手柄」的设置，通常只认 Windows 的 0 号 XInput 设备。
 
 1. `Win + R` → 输入 `joy.cpl` → **高级** → 把首选设备设成虚拟的 Xbox 360 Controller
 2. 若游戏仍吃实体手柄：用 [HidHide](https://github.com/nefarius/HidHide) 对游戏隐藏实体手柄，只留虚拟那只
